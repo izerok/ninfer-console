@@ -1,0 +1,43 @@
+# Build the ninfer-console image (monitor panel + management preview) and push it to GHCR.
+# No personal token is used: the workflow logs in with GITHUB_TOKEN only.
+# The image contains no inference engine and no model; it only polls an
+# already-running NInfer server (see README.md / SECURITY.md).
+# Tags pushed: :latest and :v<VERSION> (VERSION file at repo root).
+name: Docker Publish
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+      - name: Read version
+        id: version
+        run: echo "version=v$(cat VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # PR runs only build (the check for branch protection); only
+          # pushes to main actually push to GHCR.
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/ninfer-console:latest
+            ghcr.io/${{ github.repository_owner }}/ninfer-console:${{ steps.version.outputs.version }}

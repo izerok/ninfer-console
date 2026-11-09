@@ -1,0 +1,32 @@
+{
+  "_comment": "Copy to presets.json in the panel data volume (or point PANEL_PRESETS_FILE at it). Each preset's config is sanitized against the parameter schema on load: unknown keys and wrongly-typed values are dropped and reported on the page. Any field omitted from a preset takes the neutral blank value.",
+  "presets": [
+    {
+      "id": "balanced",
+      "label": "Balanced (example)",
+      "config": {
+        "model": "example-model",
+        "image": "registry.example.com/team/ninfer:1.0",
+        "image_nvfp4": "unknown",
+        "max_context": 65536,
+        "kv_capacity": "auto",
+        "cache_mode": "hybrid",
+        "max_concurrency": 2,
+        "spec": "mtp"
+      }
+    },
+    {
+      "id": "long-context",
+      "label": "Long context (example)",
+      "config": {
+        "model": "example-model",
+        "image": "registry.example.com/team/ninfer:1.0",
+        "max_context": 262144,
+        "kv_capacity": "auto",
+        "cache_mode": "hybrid",
+        "max_concurrency": 1,
+        "spec": "none"
+      }
+    }
+  ]
+}

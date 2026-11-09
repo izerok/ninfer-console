@@ -1,0 +1,1793 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>NInfer</title>
+<!--
+  本页按 Niko1221/Strata apps/host 的 Monitor 屏 1:1 复刻版式（MIT 许可），
+  数据源换成本地 NInfer。版式、卡片顺序、文案均照 Strata 的来：
+  模型状态卡（五态 badges + 模型进度条）→ 9 张指标卡（4 列）→
+  上下文占用 + 当前请求（含过去 1 小时观测记录）→ 对话缓存。
+  Strata 有而 NInfer 不提供的字段不造数：单请求进度（条形为进行中动画）、
+  专家缓存（改用 KV 缓存）、PCIe 传输速率（只给链路）；历史请求一栏是
+  面板自己观测的过去 1 小时记录，不是 NInfer 原生历史。
+  完整适配清单见 README。
+-->
+<style>
+  :root{
+    --st-bg:#101418; --st-surface:#1a1f26; --st-surface-2:#222833;
+    --st-line:rgba(255,255,255,.14); --st-track:rgba(255,255,255,.12);
+    --st-ink:#e6e8eb; --st-ink-muted:#9aa0a6;
+    --st-accent:#10b981; --st-accent-tint:rgba(16,185,129,.16); --st-accent-text:#34d399;
+    --st-info:#38bdf8; --st-info-tint:rgba(56,189,248,.16); --st-info-text:#7dd3fc;
+    --st-warn:#f59e0b; --st-warn-tint:rgba(245,158,11,.16); --st-warn-text:#fbbf24;
+    --st-danger:#f87171; --st-danger-tint:rgba(248,113,113,.16); --st-danger-text:#fca5a5;
+  }
+  [data-theme="light"]{
+    --st-bg:#f2f4f7; --st-surface:#ffffff; --st-surface-2:#eef1f4;
+    --st-line:rgba(0,0,0,.12); --st-track:rgba(0,0,0,.12);
+    --st-ink:#1a2027; --st-ink-muted:#5b6773;
+    --st-accent:#10b981; --st-accent-tint:rgba(16,185,129,.14); --st-accent-text:#047857;
+    --st-info:#0284c7; --st-info-tint:rgba(2,132,199,.12); --st-info-text:#0369a1;
+    --st-warn:#d97706; --st-warn-tint:rgba(217,119,6,.14); --st-warn-text:#b45309;
+    --st-danger:#dc2626; --st-danger-tint:rgba(220,38,38,.12); --st-danger-text:#b91c1c;
+  }
+  *{box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--st-bg);color:var(--st-ink);margin:0;padding:24px;max-width:1280px;margin-left:auto;margin-right:auto}
+  h1{font-size:24px;margin:0 0 4px}
+  h2{font-size:16px;margin:0}
+  .muted{color:var(--st-ink-muted)} .small{font-size:12px} .xs{font-size:10px}
+  .title-detail{color:var(--st-ink-muted);font-size:14px;margin-bottom:20px}
+  .stack{display:flex;flex-direction:column;gap:16px}
+  .st-card{background:var(--st-surface);border:1px solid var(--st-line);border-radius:20px;padding:20px;box-shadow:none}
+  /* 模型状态卡：Strata monitor-state */
+  .monitor-state{display:flex;flex-direction:column;gap:14px}
+  .monitor-state__head{display:flex;align-items:center;flex-wrap:wrap;gap:12px 18px}
+  .monitor-state__badges{display:flex;flex-wrap:wrap;gap:7px}
+  .st-badge{display:inline-flex;align-items:center;height:24px;padding:0 10px;border-radius:999px;font-size:12px;font-weight:600;border:1px solid var(--st-line);opacity:.38}
+  .st-badge[data-active="true"]{opacity:1}
+  .st-badge[data-phase="reading"]{background:var(--st-info-tint);color:var(--st-info-text);border-color:transparent}
+  .st-badge[data-phase="generating"], .st-badge[data-phase="idle"][data-active="true"]{background:var(--st-accent-tint);color:var(--st-accent-text);border-color:transparent}
+  .st-badge[data-phase="queued"]{background:var(--st-warn-tint);color:var(--st-warn-text);border-color:transparent}
+  .st-badge[data-phase="error"]{background:var(--st-danger-tint);color:var(--st-danger-text);border-color:transparent}
+  .monitor-state__reading{display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px 18px}
+  .num{font-variant-numeric:tabular-nums}
+  .st-progress{height:8px;border-radius:999px;background:var(--st-track);overflow:hidden}
+  .page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
+  .theme-btn{background:var(--st-surface);color:var(--st-ink);border:1px solid var(--st-line);border-radius:999px;padding:8px 14px;font-size:13px;cursor:pointer;white-space:nowrap}
+  .theme-btn:hover{border-color:var(--st-ink-muted)}
+  .hist-head{display:flex;align-items:center;flex-wrap:wrap;gap:12px}
+  .hist-head .range{margin-left:auto;display:flex;gap:6px}
+  .range button{background:transparent;color:var(--st-ink-muted);border:1px solid var(--st-line);border-radius:999px;padding:5px 12px;font-size:12px;cursor:pointer}
+  .range button[data-active="true"]{background:var(--st-accent-tint);color:var(--st-accent-text);border-color:transparent}
+  .hist-legend{display:flex;gap:8px;font-size:12px;color:var(--st-ink-muted);flex-wrap:wrap}
+  .dim-btn{background:transparent;color:var(--st-ink-muted);border:1px solid var(--st-line);border-radius:999px;padding:4px 10px;font-size:12px;cursor:pointer}
+  .dim-btn[data-active="true"]{color:var(--st-ink);border-color:var(--st-accent)}
+  .dim-btn[data-active="false"]{opacity:.55}
+  .hist-legend i{display:inline-block;width:14px;height:3px;border-radius:2px;vertical-align:middle;margin-right:5px}
+  #histCanvasRates{width:100%;height:220px;display:block}
+  #histCanvasUtil{width:100%;height:160px;display:block}
+  #histCanvasCum{width:100%;height:150px;display:block}
+  .hist-tip{position:absolute;pointer-events:none;background:var(--st-surface-2);border:1px solid var(--st-line);border-radius:8px;padding:6px 10px;font-size:12px;display:none;white-space:nowrap}
+  .hist-wrap{position:relative}
+  #gaugeTrack{stroke:var(--st-track)}
+  .st-progress > div{height:100%;background:var(--st-accent);border-radius:999px}
+  .st-progress > div.info{background:var(--st-info)}
+  .st-progress > div.indet{width:40%;animation:indet 1.4s ease-in-out infinite}
+  @keyframes indet{0%{margin-left:0}50%{margin-left:60%}100%{margin-left:0}}
+  .bar-label{display:flex;justify-content:space-between;font-size:12px;color:var(--st-ink-muted);margin-bottom:6px}
+  /* 指标卡：Strata monitor-metrics / monitor-metric */
+  .monitor-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}
+  .monitor-metric{min-width:0;min-height:172px;padding:18px 20px;display:flex;flex-direction:column;gap:16px}
+  .st-metric__label{display:flex;align-items:center;flex-wrap:wrap;gap:6px;font-size:12px}
+  .monitor-metric__source{margin-left:auto;color:var(--st-ink-muted);font-size:10px;font-weight:400}
+  .st-metric__value{font-size:clamp(22px,2.3vw,32px);font-weight:700;overflow-wrap:anywhere}
+  .st-metric__unit{font-size:12px;white-space:nowrap;font-weight:400}
+  .monitor-metric__sub{margin-top:10px;min-height:16px;line-height:1.45;overflow-wrap:anywhere;font-size:12px;color:var(--st-ink-muted)}
+  .monitor-speed-values{display:flex;justify-content:space-between;gap:10px}
+  .monitor-speed-values > div{min-width:0}
+  .monitor-speed-values > div:last-child{text-align:right}
+  .monitor-speed-values .st-metric__value{font-size:clamp(20px,2vw,28px)}
+  .monitor-spark{margin-top:auto;height:32px;flex:none}
+  .monitor-spark svg{display:block;width:100%;height:32px;overflow:visible}
+  /* 上下文 + 最近请求：Strata monitor-context-requests */
+  .monitor-context-requests{display:grid;grid-template-columns:minmax(250px,1fr) minmax(0,2.4fr);gap:16px;align-items:stretch}
+  .monitor-context{display:flex;flex-direction:column;gap:8px}
+  .monitor-context__gauge{align-self:center;margin:10px auto 16px;text-align:center;position:relative;width:150px;height:150px}
+  .monitor-context__gauge .gauge-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+  .monitor-context__gauge .gauge-center b{font-size:28px}
+  .monitor-bar-reading{display:flex;justify-content:space-between;gap:12px;font-size:12px;margin-top:8px}
+  .monitor-bar-reading > span:last-child{text-align:right}
+  .monitor-requests{min-width:0;display:flex;flex-direction:column;gap:14px}
+  .monitor-request-table{overflow:auto;max-height:320px}
+  .st-table{width:100%;min-width:630px;font-size:12px;border-collapse:collapse}
+  .st-table th{font-size:10px;font-weight:500;letter-spacing:.03em;white-space:nowrap;padding:10px 8px;text-align:left;color:var(--st-ink-muted);border-bottom:1px solid var(--st-line)}
+  .st-table td{padding:12px 8px;white-space:nowrap;border-bottom:1px solid var(--st-line)}
+  .st-table .num{text-align:right}
+  .st-table tr.req-past{color:var(--st-ink-muted)}
+  .monitor-cache{display:flex;flex-direction:column;gap:16px}
+  .monitor-cache-bars{display:grid;grid-template-columns:1fr 1fr;gap:24px}
+  .monitor-cache-facts{display:grid;grid-template-columns:1fr 1fr;gap:16px 24px;margin:0}
+  .monitor-cache-facts > div{display:flex;justify-content:space-between;gap:16px;font-size:12px}
+  .monitor-cache-facts dt{color:var(--st-ink-muted)}
+  .monitor-cache-facts dd{margin:0;text-align:right}
+  .warn{border:1px solid var(--st-danger);border-radius:12px;padding:12px;margin-bottom:16px;font-size:13px}
+  .update-banner{border:1px solid var(--st-accent);border-radius:12px;padding:12px 16px;margin-bottom:16px;font-size:13px;background:var(--st-accent-tint)}
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:100;display:none;align-items:flex-start;justify-content:center;padding:12vh 16px 16px}
+  .modal.open{display:flex}
+  .modal-card{background:var(--st-surface);border:1px solid var(--st-line);border-radius:16px;padding:20px;width:min(560px,100%);box-shadow:0 20px 60px rgba(0,0,0,.4)}
+  .update-banner a{color:var(--st-accent-text);font-weight:600}
+  /* 管理视图（ninfer-console v0.1）：沿用监控页的卡片/徽标/配色语言 */
+  .view-nav{display:flex;gap:6px}
+  .view-nav button{background:transparent;color:var(--st-ink-muted);border:1px solid var(--st-line);border-radius:999px;padding:8px 16px;font-size:13px;cursor:pointer}
+  .view-nav button[data-active="true"]{background:var(--st-accent-tint);color:var(--st-accent-text);border-color:transparent;font-weight:600}
+  .mg-head{display:flex;align-items:center;flex-wrap:wrap;gap:10px 14px}
+  .mg-head .spacer{flex:1}
+  .mg-badge{display:inline-flex;align-items:center;height:24px;padding:0 10px;border-radius:999px;font-size:12px;font-weight:600;border:1px solid var(--st-line);color:var(--st-ink-muted)}
+  .mg-badge.on{background:var(--st-accent-tint);color:var(--st-accent-text);border-color:transparent}
+  .mg-badge.info{background:var(--st-info-tint);color:var(--st-info-text);border-color:transparent}
+  .mg-badge.warn{background:var(--st-warn-tint);color:var(--st-warn-text);border-color:transparent}
+  .mg-badge.danger{background:var(--st-danger-tint);color:var(--st-danger-text);border-color:transparent}
+  .mg-btn{background:var(--st-surface-2);color:var(--st-ink);border:1px solid var(--st-line);border-radius:999px;padding:8px 16px;font-size:13px;cursor:pointer}
+  .mg-btn:hover{border-color:var(--st-ink-muted)}
+  .mg-btn.primary{background:var(--st-accent);border-color:transparent;color:#06281c;font-weight:700}
+  .mg-btn:disabled{opacity:.45;cursor:default}
+  .mg-facts{display:grid;grid-template-columns:repeat(4,1fr);gap:12px 24px;margin-top:16px}
+  .mg-facts dt{font-size:12px;color:var(--st-ink-muted);margin-bottom:4px}
+  .mg-facts dd{margin:0;font-size:14px;font-weight:600;overflow-wrap:anywhere}
+  .mg-model-row{display:flex;align-items:center;gap:12px;padding:14px 4px;border-bottom:1px solid var(--st-line);flex-wrap:wrap}
+  .mg-model-row:last-child{border-bottom:none}
+  .mg-model-name{font-weight:600;font-size:14px}
+  .mg-model-meta{font-size:12px;color:var(--st-ink-muted)}
+  .mg-model-row .spacer{flex:1}
+  .mg-group{border-top:1px solid var(--st-line);padding-top:16px;margin-top:16px}
+  .mg-group:first-of-type{border-top:none;padding-top:4px;margin-top:8px}
+  .mg-group h3{font-size:13px;margin:0 0 12px;color:var(--st-ink-muted);font-weight:600}
+  .mg-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px 20px}
+  .mg-field{display:flex;flex-direction:column;gap:6px;min-width:0}
+  .mg-field label{font-size:12px;color:var(--st-ink-muted)}
+  .mg-field .ctl{background:var(--st-surface-2);border:1px solid var(--st-line);border-radius:12px;padding:9px 12px;font-size:13px;color:var(--st-ink);width:100%}
+  .mg-field.changed .ctl{border-color:var(--st-warn);box-shadow:0 0 0 1px var(--st-warn)}
+  .mg-field .hint{font-size:11px;color:var(--st-ink-muted)}
+  .mg-field.changed .hint{color:var(--st-warn-text)}
+  .mg-field.disabled{opacity:.45}
+  .mg-field .chk{display:flex;align-items:center;gap:8px;background:var(--st-surface-2);border:1px solid var(--st-line);border-radius:12px;padding:9px 12px;font-size:13px}
+  .mg-issues{font-size:13px;line-height:1.7;margin-top:12px}
+  .mg-issues .err{color:var(--st-danger-text)}
+  .mg-issues .wrn{color:var(--st-warn-text)}
+  .mg-issues .ok{color:var(--st-accent-text)}
+  .mg-diff-table{width:100%;font-size:13px;border-collapse:collapse;margin:14px 0}
+  .mg-diff-table td{padding:9px 8px;border-bottom:1px solid var(--st-line)}
+  .mg-diff-table td.k{color:var(--st-ink-muted);width:34%}
+  .mg-diff-table .old{color:var(--st-ink-muted);text-decoration:line-through}
+  .mg-diff-table .new{color:var(--st-warn-text);font-weight:600}
+  .mg-warn-box{border:1px solid var(--st-warn);border-radius:12px;padding:12px 14px;font-size:13px;background:var(--st-warn-tint);margin:12px 0}
+  .mg-pre{background:var(--st-surface-2);border:1px solid var(--st-line);border-radius:12px;padding:12px;font-size:11px;overflow:auto;max-height:300px;white-space:pre}
+  @media(max-width:900px){.mg-grid{grid-template-columns:repeat(2,1fr)}.mg-facts{grid-template-columns:repeat(2,1fr)}}
+  @media(max-width:1100px){.monitor-metric{padding:16px}.monitor-metric__source{flex-basis:100%;margin:0}}
+  @media(max-width:950px){.monitor-context-requests{grid-template-columns:1fr}}
+  @media(max-width:767px){.monitor-metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.monitor-cache-bars,.monitor-cache-facts{display:flex;flex-direction:column}}
+</style>
+</head>
+<body>
+<div class="stack monitor-dashboard">
+  <header class="page-head">
+    <div>
+      <h1 data-i18n="title"></h1>
+      <div class="title-detail" id="titleDetail">—</div>
+      <div class="small muted" id="versionText"></div>
+      <div class="small muted" id="uptimeText"></div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
+      <nav class="view-nav">
+        <button type="button" id="viewMonitorBtn" data-active="true" data-i18n="mgViewMonitor"></button>
+        <button type="button" id="viewManageBtn" data-active="false" data-i18n="mgViewManage"></button>
+      </nav>
+      <button class="theme-btn" id="settingsBtn" type="button" data-i18n="settings"></button>
+      <select class="theme-btn" id="langSel" data-i18n-aria="langAria">
+        <option value="zh-CN">中文</option>
+        <option value="en">English</option>
+      </select>
+      <button class="theme-btn" id="themeBtn" type="button" data-i18n-aria="themeAria"></button>
+    </div>
+  </header>
+
+  <div id="err" class="warn" style="display:none"></div>
+  <div id="updateBanner" class="update-banner" style="display:none"></div>
+
+  <!-- 设置：单独弹窗，不占主页面位置；NInfer 地址在弹窗里改，不用改 compose -->
+  <div id="settingsModal" class="modal" role="dialog" aria-modal="true" data-i18n-aria="settings">
+    <div class="modal-card">
+      <div style="display:flex;align-items:center;gap:12px">
+        <h2 data-i18n="settings" style="margin-right:auto"></h2>
+        <button class="theme-btn" id="settingsCloseBtn" type="button" data-i18n-aria="closeAria">×</button>
+      </div>
+      <p class="small muted"><span data-i18n="currentLabel"></span>：<span class="num" id="currentBase">—</span></p>
+      <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
+        <input id="baseUrlInput" type="url" placeholder="http://host.docker.internal:8080"
+          style="flex:1;min-width:260px;background:var(--st-surface-2);color:var(--st-ink);border:1px solid var(--st-line);border-radius:10px;padding:10px 12px;font-size:14px"/>
+        <button class="theme-btn" id="saveBaseBtn" type="button" data-i18n="save"></button>
+      </div>
+      <div class="small" id="settingsMsg" style="margin-top:10px"></div>
+      <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap;align-items:center">
+        <button class="theme-btn" id="testConnBtn" type="button" data-i18n="testConn"></button>
+        <span class="small" id="testConnMsg"></span>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap;align-items:center">
+        <span class="small muted" data-i18n="pollInterval"></span>
+        <input id="pollIntervalInput" type="number" min="1" max="10" step="1"
+          style="width:70px;background:var(--st-surface-2);color:var(--st-ink);border:1px solid var(--st-line);border-radius:10px;padding:8px 10px;font-size:14px"/>
+        <span class="small muted" data-i18n="seconds"></span>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap;align-items:center">
+        <button class="theme-btn" id="checkUpdateBtn" type="button" data-i18n="checkUpdate"></button>
+        <span class="small" id="updateCheckMsg"></span>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap;align-items:center">
+        <label class="small muted" style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="notifyOfflineChk"/> <span data-i18n="notifyOffline"></span></label>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap;align-items:center">
+        <label class="small muted" style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="hidePcieChk"/> <span data-i18n="hidePcie"></span></label>
+        <label class="small muted" style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="hideDiskChk"/> <span data-i18n="hideDisk"></span></label>
+      </div>
+      <p class="small muted" style="margin:10px 0 0" data-i18n="settingsHint"></p>
+    </div>
+  </div>
+
+  <!-- 模型状态卡 -->
+  <section class="st-card monitor-state" data-i18n-aria="modelState">
+    <div class="monitor-state__head">
+      <h2 data-i18n="modelState"></h2>
+      <div class="monitor-state__badges" id="badges">
+        <span class="st-badge" data-phase="idle" data-active="false" data-i18n="badgeIdle"></span>
+        <span class="st-badge" data-phase="reading" data-active="false" data-i18n="badgeReading"></span>
+        <span class="st-badge" data-phase="generating" data-active="false" data-i18n="badgeGenerating"></span>
+        <span class="st-badge" data-phase="queued" data-active="false" data-i18n="badgeQueued"></span>
+        <span class="st-badge" data-phase="error" data-active="false" data-i18n="badgeError"></span>
+      </div>
+    </div>
+    <div class="monitor-state__reading small">
+      <span id="phaseText">—</span>
+      <span class="muted num" id="statusDetail"></span>
+    </div>
+    <div>
+      <div class="bar-label"><span data-i18n="modelProgress"></span><span id="progressNote" class="muted"></span></div>
+      <div class="st-progress"><div id="progressBar" style="width:0%"></div></div>
+    </div>
+  </section>
+
+  <!-- 9 张指标卡，顺序与 Strata 一致（速度卡已拆成解码 / 预填充两张） -->
+  <div class="monitor-metrics">
+    <section class="st-card monitor-metric" data-i18n-aria="decodeSpeed">
+      <div class="st-metric__label"><span data-i18n="decodeSpeed"></span><span class="monitor-metric__source" id="decodeSource">—</span></div>
+      <div><div class="st-metric__value"><span id="decode">—</span><span class="st-metric__unit"> tok/s</span></div><div class="monitor-metric__sub" id="decodeSub">—</div></div>
+      <div class="monitor-spark" id="decodeSpark"></div>
+    </section>
+    <section class="st-card monitor-metric" data-i18n-aria="prefillSpeed">
+      <div class="st-metric__label"><span data-i18n="prefillSpeed"></span><span class="monitor-metric__source" id="prefillSource">—</span></div>
+      <div><div class="st-metric__value"><span id="prefill">—</span><span class="st-metric__unit"> tok/s</span></div><div class="monitor-metric__sub" id="prefillSub">—</div></div>
+      <div class="monitor-spark" id="prefillSpark"></div>
+    </section>
+    <section class="st-card monitor-metric" data-i18n-aria="gpuLoad">
+      <div class="st-metric__label"><span data-i18n="gpuLoad"></span><span class="monitor-metric__source" id="gpuLoadSource">—</span></div>
+      <div><div class="st-metric__value"><span id="gpuLoad">—</span><span class="st-metric__unit"> %</span></div><div class="monitor-metric__sub" id="gpuLoadSub">—</div></div>
+      <div class="monitor-spark" id="gpuLoadSpark"></div>
+    </section>
+    <section class="st-card monitor-metric" data-i18n-aria="vram">
+      <div class="st-metric__label"><span data-i18n="vram"></span><span class="monitor-metric__source" id="vramSource">—</span></div>
+      <div><div class="st-metric__value"><span id="vram">—</span><span class="st-metric__unit" id="vramUnit"> GB</span></div><div class="monitor-metric__sub" id="vramSub">—</div></div>
+      <div class="monitor-spark" id="vramSpark"></div>
+    </section>
+    <section class="st-card monitor-metric" data-i18n-aria="temp">
+      <div class="st-metric__label"><span data-i18n="temp"></span><span class="monitor-metric__source" id="tempSource">—</span></div>
+      <div><div class="st-metric__value"><span id="temp">—</span><span class="st-metric__unit"> °C</span></div><div class="monitor-metric__sub" id="tempSub">—</div></div>
+      <div class="monitor-spark" id="tempSpark"></div>
+    </section>
+    <section class="st-card monitor-metric" data-i18n-aria="power">
+      <div class="st-metric__label"><span data-i18n="power"></span><span class="monitor-metric__source" id="powerSource">—</span></div>
+      <div><div class="st-metric__value"><span id="power">—</span><span class="st-metric__unit"> W</span></div><div class="monitor-metric__sub" id="powerSub">—</div></div>
+      <div class="monitor-spark" id="powerSpark"></div>
+    </section>
+    <section class="st-card monitor-metric" id="pcieCard" data-i18n-aria="pcie">
+      <div class="st-metric__label"><span data-i18n="pcie"></span><span class="monitor-metric__source" id="pcieSource">—</span></div>
+      <div><div class="st-metric__value"><span id="pcie">—</span><span class="st-metric__unit" id="pcieUnit"></span></div><div class="monitor-metric__sub" id="pcieSub">—</div></div>
+      <div class="monitor-spark" id="pcieSpark"></div>
+    </section>
+    <section class="st-card monitor-metric" data-i18n-aria="cpu">
+      <div class="st-metric__label"><span data-i18n="cpu"></span><span class="monitor-metric__source" id="cpuSource">—</span></div>
+      <div><div class="st-metric__value"><span id="cpu">—</span><span class="st-metric__unit"> %</span></div><div class="monitor-metric__sub" id="cpuSub">—</div></div>
+      <div class="monitor-spark" id="cpuSpark"></div>
+    </section>
+    <section class="st-card monitor-metric" id="diskCard" data-i18n-aria="diskRead">
+      <div class="st-metric__label"><span data-i18n="diskRead"></span><span class="monitor-metric__source" id="diskSource">—</span></div>
+      <div><div class="st-metric__value"><span id="disk">—</span><span class="st-metric__unit" id="diskUnit"></span></div><div class="monitor-metric__sub" id="diskSub">—</div></div>
+      <div class="monitor-spark" id="diskSpark"></div>
+    </section>
+    <section class="st-card monitor-metric" data-i18n-aria="outTokens">
+      <div class="st-metric__label"><span data-i18n="outTokens"></span><span class="monitor-metric__source" id="outTokensSource">—</span></div>
+      <div><div class="st-metric__value"><span id="outTokens">—</span><span class="st-metric__unit" id="outTokensUnit"></span></div><div class="monitor-metric__sub" id="outTokensSub">—</div></div>
+      <div class="monitor-spark" id="outTokensSpark"></div>
+    </section>
+  </div>
+
+  <!-- 上下文占用 + 当前请求 -->
+  <div class="monitor-context-requests">
+    <section class="st-card monitor-context">
+      <h2 data-i18n="context"></h2>
+      <div class="monitor-context__gauge">
+        <svg viewBox="0 0 120 120" width="150" height="150" style="transform:rotate(135deg)">
+          <circle id="gaugeTrack" cx="60" cy="60" r="50" fill="none" stroke-width="10" stroke-dasharray="235.6 314.2"/>
+          <circle id="gaugeArc" cx="60" cy="60" r="50" fill="none" stroke="#10b981" stroke-width="10" stroke-dasharray="0 314.2" stroke-linecap="round"/>
+        </svg>
+        <div class="gauge-center"><b id="gaugePct">—</b><span class="small muted" id="gaugeSub">—</span></div>
+      </div>
+      <div class="monitor-bar-reading"><span data-i18n="kvCache"></span><span class="muted num" id="kvBarText">—</span></div>
+      <div class="st-progress"><div id="kvBar" style="width:0%"></div></div>
+      <div class="monitor-bar-reading"><span data-i18n="sysMem"></span><span class="muted num" id="ramBarText">—</span></div>
+      <div class="st-progress"><div id="ramBar" style="width:0%"></div></div>
+      <div class="monitor-bar-reading"><span data-i18n="gpuTemp"></span><span class="muted num" id="tempBarText">—</span></div>
+      <div class="st-progress"><div id="tempBar" class="info" style="width:0%"></div></div>
+      <p class="small muted" style="margin:8px 0 0" data-i18n="contextNote"></p>
+    </section>
+    <section class="st-card monitor-requests">
+      <h2 data-i18n="currentReq"></h2>
+      <div class="monitor-request-table">
+        <table class="st-table"><thead><tr><th data-i18n="slot"></th><th class="num" data-i18n="prompt"></th><th class="num" data-i18n="outCol"></th><th class="num" data-i18n="cached"></th><th class="num" data-i18n="ctxWindow"></th><th class="num" data-i18n="shareWindow"></th><th class="num" data-i18n="reqAvgDecode"></th><th class="num" data-i18n="reqProcTime"></th><th data-i18n="reqStatus"></th></tr></thead>
+        <tbody id="currentReqBody"><tr><td colspan="9" class="muted">—</td></tr></tbody></table>
+      </div>
+      <p class="small muted" style="margin:auto 0 0;padding-top:10px" id="requestTotals" data-i18n="currentNote"></p>
+      <p class="small muted" style="margin:0" id="reqHistoryNote" data-i18n="reqHistoryNote"></p>
+    </section>
+  </div>
+
+  <!-- 对话缓存：Strata 原栏，NInfer 以上下文缓存对应 -->
+  <section class="st-card monitor-cache">
+    <h2 data-i18n="cache"></h2>
+    <div class="monitor-cache-bars">
+      <div><div class="monitor-bar-reading"><span data-i18n="parkedSessions"></span><span class="muted num" id="parkedText">—</span></div><div class="st-progress"><div id="parkedBar" style="width:0%"></div></div></div>
+      <div><div class="monitor-bar-reading"><span data-i18n="theirMem"></span><span class="muted num" id="cacheMemText">—</span></div><div class="st-progress"><div id="cacheMemBar" style="width:0%"></div></div></div>
+    </div>
+    <dl class="monitor-cache-facts">
+      <div><dt data-i18n="lastReq"></dt><dd id="lastCacheText">—</dd></div>
+      <div><dt data-i18n="reusedSince"></dt><dd id="reusedTotalText">—</dd></div>
+    </dl>
+    <div id="cacheExtra" class="small muted" style="display:none"></div>
+    <p class="small muted" data-i18n="cacheNote"></p>
+  </section>
+
+  <!-- 历史曲线：后端落盘，刷新页面不丢失 -->
+  <section class="st-card" data-i18n-aria="history">
+    <div class="hist-head">
+      <h2 data-i18n="history"></h2>
+      <div class="hist-legend" id="histLegend">
+        <button type="button" class="dim-btn" data-dim="decode" data-active="true"><i style="background:#10b981"></i><span data-i18n="legendDecode"></span></button>
+        <button type="button" class="dim-btn" data-dim="prefill" data-active="true"><i style="background:#38bdf8"></i><span data-i18n="legendPrefill"></span></button>
+        <button type="button" class="dim-btn" data-dim="kv" data-active="false"><i style="background:#f59e0b"></i><span data-i18n="legendKv"></span></button>
+        <button type="button" class="dim-btn" data-dim="gpu" data-active="false"><i style="background:#a78bfa"></i><span data-i18n="legendGpu"></span></button>
+        <button type="button" class="dim-btn" data-dim="accept" data-active="false"><i style="background:#fb7185"></i><span data-i18n="legendAccept"></span></button>
+        <button type="button" class="dim-btn" data-dim="cum" data-active="true"><i style="background:#10b981"></i><span data-i18n="legendCum"></span></button>
+      </div>
+      <div class="range" id="histRange">
+        <button type="button" data-minutes="15" data-active="true" data-i18n="range15"></button>
+        <button type="button" data-minutes="60" data-i18n="range60"></button>
+        <button type="button" data-minutes="1440" data-i18n="range1440"></button>
+        <button type="button" id="range10080Btn" data-minutes="10080" data-i18n="range10080"></button>
+      </div>
+      <button type="button" class="theme-btn" id="exportHistBtn" data-i18n="exportCsv"></button>
+    </div>
+    <div id="histPanelRates">
+      <div class="small muted" style="margin-top:12px" data-i18n="histPanelRates"></div>
+      <div class="hist-wrap">
+        <canvas id="histCanvasRates"></canvas>
+        <div class="hist-tip" id="histTipRates"></div>
+      </div>
+      <div class="small" id="histStatsRates" style="margin-top:8px"></div>
+    </div>
+    <div id="histPanelUtil">
+      <div class="small muted" style="margin-top:12px" data-i18n="histPanelUtil"></div>
+      <div class="hist-wrap">
+        <canvas id="histCanvasUtil"></canvas>
+        <div class="hist-tip" id="histTipUtil"></div>
+      </div>
+      <div class="small" id="histStatsUtil" style="margin-top:8px"></div>
+    </div>
+    <div id="histPanelCum">
+      <div class="small muted" style="margin-top:12px" data-i18n="cumOut"></div>
+      <div class="hist-wrap">
+        <canvas id="histCanvasCum"></canvas>
+        <div class="hist-tip" id="histTipCum"></div>
+      </div>
+      <div class="small" id="histStatsCum" style="margin-top:8px"></div>
+    </div>
+    <p class="small muted" style="margin:10px 0 0" data-i18n="histNote"></p>
+  </section>
+
+  <!-- 状态事件：只记轮询到的状态变化，不新增 NInfer 调用 -->
+  <section class="st-card" data-i18n-aria="events">
+    <h2 data-i18n="events"></h2>
+    <ul id="eventList" style="margin:8px 0 0;padding-left:20px;font-size:13px;line-height:1.8"></ul>
+    <p class="small muted" id="eventsEmpty" style="display:none" data-i18n="eventsEmpty"></p>
+  </section>
+
+  <p class="small muted" data-i18n="footerNote"></p>
+</div>
+
+<!-- 管理视图（ninfer-console）：只读预览——选模型、改参数、看 diff；
+     不接生效：不碰 Docker、不写 compose、不给 NInfer 发任何请求。
+     模型库/预设/限额全部来自运行环境（模型目录、运营者数据文件、实测），代码不带任何部署的配置。 -->
+<div class="stack" id="manageView" style="display:none">
+  <div class="mg-warn-box" style="margin:0" data-i18n="mgReadonlyBanner"></div>
+  <div class="mg-warn-box" id="mgProblems" style="margin:0;display:none"></div>
+
+  <section class="st-card">
+    <div class="mg-head">
+      <h2 data-i18n="mgRunning"></h2>
+      <span class="mg-badge on" id="mgRunState">—</span>
+      <span class="spacer"></span>
+      <span class="small muted" id="mgLiveCheck"></span>
+    </div>
+    <dl class="mg-facts">
+      <div><dt data-i18n="mgF_model"></dt><dd id="mgRunModel">—</dd></div>
+      <div><dt data-i18n="mgF_image"></dt><dd class="num" id="mgRunImage">—</dd></div>
+      <div><dt data-i18n="mgInflight"></dt><dd class="num" id="mgRunInflight">—</dd></div>
+      <div><dt data-i18n="mgCurrentSource"></dt><dd id="mgRunSource">—</dd></div>
+    </dl>
+  </section>
+
+  <section class="st-card">
+    <div class="mg-head"><h2 data-i18n="mgModels"></h2><span class="muted small" id="mgModelsNote"></span></div>
+    <div id="mgModelList" style="margin-top:6px"></div>
+  </section>
+
+  <section class="st-card">
+    <div class="mg-head">
+      <h2 data-i18n="mgParams"></h2>
+      <span class="muted small" data-i18n="mgChangedHint"></span>
+      <span class="spacer"></span>
+      <select class="mg-btn" id="mgPresetSel"></select>
+      <button class="mg-btn" type="button" id="mgPresetLoad" data-i18n="mgLoadPreset"></button>
+    </div>
+    <div class="small" id="mgDraftNote" style="margin-top:10px;display:none">
+      <span data-i18n="mgDraftNote"></span>
+      <button class="mg-btn" type="button" id="mgDraftClear" data-i18n="mgDraftClear"></button>
+    </div>
+    <form id="mgForm" autocomplete="off"></form>
+    <div class="mg-issues" id="mgIssues"></div>
+    <div class="mg-group">
+      <div class="mg-head">
+        <span class="mg-badge warn" id="mgChangeCount" style="display:none"></span>
+        <span class="spacer"></span>
+        <button class="mg-btn" type="button" id="mgSaveCurrentBtn" data-i18n="mgSaveCurrent"></button>
+        <button class="mg-btn" type="button" id="mgPreviewBtn" data-i18n="mgPreview"></button>
+        <button class="mg-btn primary" type="button" id="mgApplyBtn" disabled data-i18n="mgApplyDisabled"></button>
+      </div>
+      <div class="muted small" style="margin-top:10px" data-i18n="mgApplyNote"></div>
+    </div>
+  </section>
+
+  <section class="st-card">
+    <div class="mg-head"><h2 data-i18n="mgHistory"></h2><span class="muted small" data-i18n="mgHistoryNote"></span></div>
+    <div style="overflow:auto">
+    <table class="st-table" style="min-width:0">
+      <thead><tr><th data-i18n="mgHistTime"></th><th data-i18n="mgF_model"></th><th data-i18n="mgF_image"></th><th data-i18n="mgHistSummary"></th><th data-i18n="mgHistSource"></th><th></th></tr></thead>
+      <tbody id="mgHistoryBody"><tr><td colspan="6" class="muted">—</td></tr></tbody>
+    </table>
+    </div>
+  </section>
+</div>
+
+<!-- 预览变更弹窗：diff + 中断警告 + 将生成的 compose（仅预览文本） -->
+<div id="mgDiffModal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card" style="width:min(680px,100%)">
+    <div style="display:flex;align-items:center;gap:12px">
+      <h2 data-i18n="mgPreview" style="margin-right:auto"></h2>
+      <button class="theme-btn" id="mgDiffClose" type="button" data-i18n-aria="closeAria">×</button>
+    </div>
+    <div id="mgDiffBody"></div>
+    <div class="mg-warn-box" id="mgDiffWarn"></div>
+    <details>
+      <summary class="small muted" data-i18n="mgComposeSummary"></summary>
+      <pre class="mg-pre" id="mgComposePre"></pre>
+    </details>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px">
+      <button class="mg-btn" type="button" id="mgDiffCancel" data-i18n="mgClose"></button>
+      <button class="mg-btn primary" type="button" disabled data-i18n="mgApplyDisabled"></button>
+    </div>
+  </div>
+</div>
+
+<script src="/i18n.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+
+// 多语言：字典式，不引任何外部库。加一种语言只需在 I18N 里加一节，
+// 并在 header 的语言选择框里加一个 option；缺失的 key 回退中文。
+// UI strings live in web/i18n.js (loaded below) — do not put them here.
+// I18N is a global from i18n.js; applyI18n() fills data-i18n / data-i18n-aria.
+let LANG = localStorage.getItem('ninfer-panel-lang') ||
+  (navigator.language && navigator.language.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en');
+if(!I18N[LANG]) LANG = 'zh-CN';
+const T = () => I18N[LANG];
+function applyI18n(){
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const v = T()[el.dataset.i18n];
+    if(v !== undefined) el.textContent = v;
+  });
+  document.querySelectorAll('[data-i18n-aria]').forEach(el => {
+    const v = T()[el.dataset.i18nAria];
+    if(v !== undefined) el.setAttribute('aria-label', v);
+  });
+  document.title = T().title + ' · NInfer';
+  document.documentElement.lang = LANG === 'zh-CN' ? 'zh-CN' : 'en';
+  const sel = $('langSel'); if(sel) sel.value = LANG;
+}
+
+// 主题：默认深色；跟随系统只在用户没手动选过时生效，选择存 localStorage.
+(function(){
+  const saved = localStorage.getItem('ninfer-panel-theme');
+  const theme = saved || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+  document.documentElement.dataset.theme = theme;
+  const btn = $('themeBtn');
+  const sync = () => { btn.textContent = document.documentElement.dataset.theme === 'light' ? T().themeDark : T().themeLight; };
+  sync();
+  btn.addEventListener('click', () => {
+    const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+    document.documentElement.dataset.theme = next;
+    localStorage.setItem('ninfer-panel-theme', next);
+    sync();
+  });
+})();
+const langSel = $('langSel');
+langSel.addEventListener('change', () => {
+  LANG = langSel.value in I18N ? langSel.value : 'zh-CN';
+  localStorage.setItem('ninfer-panel-lang', LANG);
+  applyI18n(); renderUpdateBanner();
+  tick(); drawHistory();
+});
+applyI18n();
+// 历史曲线：数据来自后端 /api/history（落盘），刷新不丢。
+let histMinutes = 15, histSamples = [];
+let _histMarkers = []; // {x, color, text} for events inside the drawn window
+// Dimension selection, persisted in localStorage (default: decode + prefill,
+// the previous view). Toggling only redraws — samples already carry all dims.
+let histDims = (() => {
+  try{
+    const saved = JSON.parse(localStorage.getItem('ninfer-panel-hist-dims') || 'null');
+    if(Array.isArray(saved) && saved.length && saved.every(d => ['decode','prefill','kv','gpu','cum','accept'].includes(d))) return saved;
+  }catch(e){ /* fall through to default */ }
+  return ['decode', 'prefill', 'cum'];
+})();
+function syncHistDims(){
+  document.querySelectorAll('#histLegend .dim-btn').forEach(b => {
+    b.dataset.active = histDims.includes(b.dataset.dim) ? 'true' : 'false';
+  });
+}
+syncHistDims();
+document.querySelectorAll('#histLegend .dim-btn').forEach(b => b.addEventListener('click', () => {
+  const dim = b.dataset.dim;
+  histDims = histDims.includes(dim) ? histDims.filter(d => d !== dim) : [...histDims, dim];
+  try{ localStorage.setItem('ninfer-panel-hist-dims', JSON.stringify(histDims)); }catch(e){}
+  syncHistDims();
+  drawHistory();
+}));
+document.querySelectorAll('#histRange button').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('#histRange button').forEach(x => x.dataset.active = 'false');
+  b.dataset.active = 'true';
+  histMinutes = parseInt(b.dataset.minutes, 10);
+  // Bug fix: the old handler only redrew the previous window's samples and
+  // waited up to 2 s for the next tick to refetch. Fetch now, then draw.
+  fetchHistory().then(drawHistory);
+}));
+async function fetchHistory(){
+  try{
+    const j = await (await fetch('/api/history?minutes=' + histMinutes)).json();
+    histSamples = j.samples || [];
+    // The 7-day range is only real when the backend keeps that long;
+    // otherwise the button would promise a window the API clamps away.
+    const b7 = $('range10080Btn');
+    if(b7) b7.style.display = (j.retention_seconds && j.retention_seconds >= 604800) ? '' : 'none';
+  }catch(e){ /* 曲线缺失不影响主面板 */ }
+}
+// History panels (v0.1.7): one unit per panel, sharing the time axis.
+// The old single dual-axis canvas mixed tok/s and % and let a 0/100 GPU
+// square wave bury the rate lines; splitting by unit is what makes each
+// panel readable. Cumulative output is a 5th legend dimension (field
+// "out"), not a separate canvas: toggling it hides its panel, and the
+// CSV columns follow the legend selection. The second series in a panel
+// is dashed, so series are never distinguished by hue alone (ui-ux-pro-max
+// chart guidance: distinct line styles plus direct labels, not color alone).
+const HIST_DIMS = {
+  decode:{field:'decode', labelKey:'histTipDecode', fill:true, dash:null},
+  prefill:{field:'prefill', labelKey:'histTipPrefill', fill:true, dash:[6,4]},
+  kv:{field:'kv', labelKey:'histTipKv', fill:false, dash:null},
+  gpu:{field:'gpu', labelKey:'histTipGpu', fill:false, dash:[6,4]},
+  accept:{field:'accept', labelKey:'histTipAccept', fill:false, dash:[2,3]},
+  cum:{field:'out', labelKey:'histTipCum', fill:true, dash:null},
+};
+function histDimColor(d){
+  const light = document.documentElement.getAttribute('data-theme') === 'light';
+  return {decode: light ? '#059669' : '#10b981',
+    prefill: light ? '#0284c7' : '#38bdf8',
+    kv: light ? '#d97706' : '#f59e0b',
+    gpu: light ? '#7c3aed' : '#a78bfa',
+    cum: light ? '#059669' : '#10b981',
+    accept: light ? '#e11d48' : '#fb7185'}[d];
+}
+function histDimFmt(d, v){
+  if(d === 'decode') return fmtRateNum(v) + ' tok/s';
+  if(d === 'prefill') return fmtRateRaw(v) + ' tok/s';
+  if(d === 'kv' || d === 'gpu' || d === 'accept') return fmtPct1(v);
+  return fmtTok(v);
+}
+const HIST_PANELS = [
+  {id:'rates', dims:['decode','prefill'], height:220, statsEl:'histStatsRates',
+   canvas:'histCanvasRates', tip:'histTipRates', wrap:'histPanelRates',
+   emptyMsgKey:'histCollecting',
+   yMaxOf: pts => Math.max(1, ...pts.flatMap(p => ['decode','prefill'].map(d => p[d] || 0))) * 1.1,
+   yFmt: v => v >= 100 ? Math.round(v) + '' : v.toFixed(1)},
+  {id:'util', dims:['kv','gpu','accept'], height:160, statsEl:'histStatsUtil',
+   canvas:'histCanvasUtil', tip:'histTipUtil', wrap:'histPanelUtil',
+   emptyMsgKey:'histCollecting',
+   yMaxOf: () => 100,
+   yFmt: v => Math.round(v) + '%'},
+  {id:'cum', dims:['cum'], height:150, statsEl:'histStatsCum',
+   canvas:'histCanvasCum', tip:'histTipCum', wrap:'histPanelCum',
+   emptyMsgKey:'cumNoData',
+   yMaxOf: pts => Math.max(1, ...pts.map(p => p.out || 0)) * 1.1,
+   yFmt: v => fmtTok(v)},
+];
+function drawHistPanel(cfg, pts, t0, t1, showX, statsText){
+  const cv = $(cfg.canvas), tip = $(cfg.tip), st = $(cfg.statsEl);
+  if(!cv) return;
+  const dpr = window.devicePixelRatio || 1, w = cv.clientWidth || 800, h = cfg.height;
+  if(cv.width !== w * dpr){ cv.width = w * dpr; cv.height = h * dpr; }
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const cs = getComputedStyle(document.documentElement);
+  const grid = cs.getPropertyValue('--st-line').trim() || 'rgba(128,128,128,.2)';
+  const muted = cs.getPropertyValue('--st-ink-muted').trim() || '#888';
+  ctx.clearRect(0, 0, w, h);
+  const padL = 44, padR = 8, padT = 16, padB = showX ? 22 : 8, iw = w - padL - padR, ih = h - padT - padB;
+  const panelPts = pts.filter(p => cfg.dims.some(d => p[HIST_DIMS[d].field] !== null && p[HIST_DIMS[d].field] !== undefined));
+  if(panelPts.length < 2){
+    ctx.fillStyle = muted; ctx.font = '13px system-ui, sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(T()[cfg.emptyMsgKey], w / 2, h / 2);
+    if(st) st.textContent = '';
+    cv.onmousemove = null; cv.onmouseleave = null;
+    return;
+  }
+  const yMax = cfg.yMaxOf(panelPts);
+  ctx.strokeStyle = grid; ctx.lineWidth = 1;
+  for(let i = 0; i <= 4; i++){
+    const y = padT + ih * i / 4;
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - padR, y); ctx.stroke();
+  }
+  const X = p => padL + (t1 > t0 ? (p.t - t0) / (t1 - t0) : 0) * iw;
+  const Y = v => padT + ih * (1 - v / yMax);
+  cfg.dims.forEach(d => {
+    const D = HIST_DIMS[d], color = histDimColor(d);
+    ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.lineJoin = 'round';
+    ctx.setLineDash(D.dash || []);
+    let seg = [];
+    const flush = () => {
+      if(!seg.length) return;
+      ctx.beginPath();
+      seg.forEach((pt, i) => { if(i) ctx.lineTo(pt.x, pt.y); else ctx.moveTo(pt.x, pt.y); });
+      ctx.stroke();
+      if(D.fill && seg.length > 1){
+        ctx.lineTo(seg[seg.length - 1].x, padT + ih);
+        ctx.lineTo(seg[0].x, padT + ih);
+        ctx.closePath();
+        ctx.globalAlpha = 0.12; ctx.fillStyle = color; ctx.fill(); ctx.globalAlpha = 1;
+      }
+      seg = [];
+    };
+    panelPts.forEach(p => {
+      const v = p[D.field];
+      if(v === null || v === undefined) { flush(); return; }
+      seg.push({x: X(p), y: Y(v)});
+    });
+    flush();
+    ctx.setLineDash([]);
+  });
+  // State-change markers, same x on every panel.
+  _histMarkers.forEach(m => {
+    ctx.beginPath(); ctx.strokeStyle = m.color; ctx.lineWidth = 1.5;
+    ctx.moveTo(m.x, padT); ctx.lineTo(m.x, h - padB); ctx.stroke();
+  });
+  // Y-axis labels last, so fills and markers never wash them out.
+  ctx.fillStyle = muted; ctx.font = '11px system-ui, sans-serif'; ctx.textAlign = 'right';
+  for(let i = 0; i <= 4; i++){
+    const y = padT + ih * i / 4, v = yMax * (1 - i / 4);
+    ctx.fillText(cfg.yFmt(v), padL - 4, y - 3);
+  }
+  if(showX){
+    const fmtAxisTime = (tt) => {
+      const d = new Date(tt * 1000), span = t1 - t0;
+      if(span >= 86400) return d.toLocaleDateString([], {month:'numeric', day:'numeric'}) + ' ' + d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+      if(span >= 3600) return d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+      return d.toLocaleTimeString();
+    };
+    ctx.fillStyle = muted; ctx.font = '11px system-ui, sans-serif';
+    for(let i = 0; i <= 4; i++){
+      const tt = t0 + (t1 - t0) * i / 4, xx = padL + iw * i / 4;
+      ctx.textAlign = i === 0 ? 'left' : (i === 4 ? 'right' : 'center');
+      ctx.fillText(fmtAxisTime(tt), xx, h - 6);
+    }
+  }
+  if(st) st.textContent = statsText || '';
+  cv.onmousemove = (ev) => {
+    const rect = cv.getBoundingClientRect();
+    const x = ev.clientX - rect.left;
+    const marker = _histMarkers.find(m => Math.abs(m.x - x) <= 6);
+    if(marker){
+      tip.style.display = 'block';
+      tip.style.left = Math.min(w - 190, x + 12) + 'px';
+      tip.style.top = '8px';
+      tip.textContent = marker.text;
+      return;
+    }
+    let best = null, bestD = 1e9;
+    panelPts.forEach(p => {
+      const px = X(p);
+      const d = Math.abs(px - x);
+      if(d < bestD){ bestD = d; best = p; }
+    });
+    if(best){
+      tip.style.display = 'block';
+      tip.style.left = Math.min(w - 190, x + 12) + 'px';
+      tip.style.top = '8px';
+      const tipParts = cfg.dims.map(d => {
+        const v = best[HIST_DIMS[d].field];
+        return T()[HIST_DIMS[d].labelKey] + ' ' + histDimFmt(d, v);
+      });
+      tip.textContent = new Date(best.t * 1000).toLocaleTimeString() + ' · ' + tipParts.join(' · ');
+    }
+  };
+  cv.onmouseleave = () => { tip.style.display = 'none'; };
+}
+function drawHistory(){
+  // Axis fits the data span when it is shorter than the selected window,
+  // so the curve always fills the chart; otherwise it uses the full window.
+  // End at the newest sample (not browser clock, which may skew from the host).
+  const lastT = histSamples.length ? histSamples[histSamples.length - 1].t : Date.now() / 1000;
+  const t1 = Math.max(Date.now() / 1000, lastT);
+  const dataT0 = histSamples.length ? histSamples[0].t : t1;
+  const t0 = (lastT - dataT0 < histMinutes * 60) ? dataT0 : t1 - histMinutes * 60;
+  const pts = histSamples.filter(p => p.t >= t0 && histDims.some(d => p[HIST_DIMS[d].field] !== null && p[HIST_DIMS[d].field] !== undefined));
+  // Legend chips show each dimension's latest value, and their dots follow
+  // the theme-aware line palette.
+  document.querySelectorAll('#histLegend .dim-btn').forEach(b => {
+    const d = b.dataset.dim;
+    if(!HIST_DIMS[d]) return;
+    const dot = b.querySelector('i');
+    if(dot) dot.style.background = histDimColor(d);
+    const span = b.querySelector('span');
+    if(!span) return;
+    for(let i = pts.length - 1; i >= 0; i--){
+      const v = pts[i][HIST_DIMS[d].field];
+      if(v === null || v === undefined) continue;
+      const base = span.textContent.split(' · ')[0];
+      span.textContent = base + ' · ' + (d === 'cum' ? fmtTok(v) : Number(v).toFixed(1) + ((d === 'kv' || d === 'gpu' || d === 'accept') ? '%' : ''));
+      break;
+    }
+  });
+  const visible = HIST_PANELS.filter(cfg => cfg.dims.some(d => histDims.includes(d)));
+  // Markers once, shared by every panel (same plot geometry).
+  let _w = 800;
+  for(const cfg of visible){ const c = $(cfg.canvas); if(c && c.clientWidth){ _w = c.clientWidth; break; } }
+  const padL = 44, padR = 8, iw = _w - padL - padR;
+  _histMarkers = [];
+  _eventsCache.forEach(e => {
+    if(e.t < t0 || e.t > t1) return;
+    const mx = padL + (t1 > t0 ? (e.t - t0) / (t1 - t0) : 0) * iw;
+    const color = e.to === 'offline' ? '#f87171' : (e.from === 'offline' ? '#10b981' : '#9ca3af');
+    _histMarkers.push({x: mx, color, text: new Date(e.t * 1000).toLocaleTimeString() + ' ' +
+      stateLabel(e.from) + ' → ' + stateLabel(e.to) + (e.error ? ' · ' + e.error.slice(0, 100) : '')});
+  });
+  if(!histDims.length){
+    // No dimensions: the rates panel holds the message, the rest hide.
+    HIST_PANELS.forEach(cfg => {
+      const wrap = $(cfg.wrap);
+      if(wrap) wrap.style.display = cfg.id === 'rates' ? '' : 'none';
+      const st = $(cfg.statsEl); if(st) st.textContent = '';
+    });
+    const cv = $('histCanvasRates');
+    if(cv){
+      const dpr = window.devicePixelRatio || 1, w = cv.clientWidth || 800, h = 220;
+      if(cv.width !== w * dpr){ cv.width = w * dpr; cv.height = h * dpr; }
+      const ctx = cv.getContext('2d');
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const cs = getComputedStyle(document.documentElement);
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = cs.getPropertyValue('--st-ink-muted').trim() || '#888';
+      ctx.font = '13px system-ui, sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText(T().histNoDims, w / 2, h / 2);
+      cv.onmousemove = null; cv.onmouseleave = null;
+    }
+    return;
+  }
+  const lastVisible = visible[visible.length - 1];
+  HIST_PANELS.forEach(cfg => {
+    const wrap = $(cfg.wrap);
+    const on = visible.includes(cfg);
+    if(wrap) wrap.style.display = on ? '' : 'none';
+    if(!on){ const st = $(cfg.statsEl); if(st) st.textContent = ''; return; }
+    const panelPts = pts.filter(p => cfg.dims.some(d => p[HIST_DIMS[d].field] !== null && p[HIST_DIMS[d].field] !== undefined));
+    // Window stats, computed only from the samples already drawn (no new calls).
+    const _avg = (field) => {
+      const vs = panelPts.map(p => p[field]).filter(v => v !== null && v !== undefined);
+      return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null;
+    };
+    const _peak = (field) => {
+      const vs = panelPts.map(p => p[field]).filter(v => v !== null && v !== undefined);
+      return vs.length ? Math.max(...vs) : null;
+    };
+    let statsText = '';
+    if(cfg.id === 'rates'){
+      const parts = [];
+      if(histDims.includes('decode')){ const a = _avg('decode'), p = _peak('decode'); if(a !== null) parts.push(T().histTipDecode + ' ' + T().statAvg + ' ' + fmtRateNum(a) + ' tok/s · ' + T().statPeak + ' ' + fmtRateNum(p) + ' tok/s'); }
+      if(histDims.includes('prefill')){ const a = _avg('prefill'), p = _peak('prefill'); if(a !== null) parts.push(T().histTipPrefill + ' ' + T().statAvg + ' ' + fmtRateRaw(a) + ' tok/s · ' + T().statPeak + ' ' + fmtRateRaw(p) + ' tok/s'); }
+      statsText = parts.join(' · ');
+    } else if(cfg.id === 'util'){
+      const parts = [];
+      if(histDims.includes('kv')){ const a = _avg('kv'); if(a !== null) parts.push(T().histTipKv + ' ' + T().statAvg + ' ' + fmtPct1(a)); }
+      if(histDims.includes('gpu')){ const a = _avg('gpu'); if(a !== null) parts.push(T().histTipGpu + ' ' + T().statAvg + ' ' + fmtPct1(a)); }
+      if(histDims.includes('accept')){ const a = _avg('accept'); if(a !== null) parts.push(T().histTipAccept + ' ' + T().statAvg + ' ' + fmtPct1(a)); }
+      statsText = parts.join(' · ');
+    } else if(cfg.id === 'cum'){
+      const outs = panelPts.map(p => p.out).filter(v => v !== null && v !== undefined);
+      if(outs.length >= 2){
+        const first = outs[0], last = outs[outs.length - 1];
+        const delta = last >= first ? last - first : null;
+        statsText = T().cumOut + ' ' + fmtTok(last) + (delta !== null ? ' · ' + T().cumWindow + ' ' + fmtTok(delta) : '');
+      }
+    }
+    drawHistPanel(cfg, pts, t0, t1, cfg === lastVisible, statsText);
+  });
+}
+const has = v => v!==null && v!==undefined && isFinite(v);
+const fmt = (v, d=1) => has(v) ? Number(v).toFixed(d) : '—';
+// Display-only unit rules (demo-approved 2026-11-03; snapshot raw numbers unchanged):
+// - token counts: >=1000 shorten to K/M, exact value kept in title="..." on table cells
+// - rates: >=1000 tok/s shorten to k tok/s, unit always written out as tok/s (never t/s)
+// - bytes: auto-scale B/KB/MB/GB; percents: always 1 decimal; durations: h/m/s, no bare seconds
+const fmtTok = v => {
+  if(!has(v)) return '—';
+  const n = Number(v);
+  if(n < 1000) return Math.round(n).toLocaleString();
+  if(n < 1e6){ const k = n / 1000; return (Number.isInteger(k) ? k : k.toFixed(1)) + 'K'; }
+  const m = n / 1e6; return (Number.isInteger(m) ? m : m.toFixed(2)) + 'M';
+};
+const fmtRateNum = v => {
+  if(!has(v)) return '—';
+  const n = Number(v);
+  return n >= 1000 ? (n / 1000).toFixed(2) + 'k' : n.toFixed(1);
+};
+// Prefill rates never shorten to k (v0.1.5): prefill runs into the thousands
+// and the raw number is wanted; decode keeps the k rule above.
+const fmtRateRaw = v => has(v) ? Number(v).toFixed(1) : '—';
+const fmtBytes = b => {
+  if(!has(b)) return '—';
+  const n = Number(b);
+  if(n >= 1073741824) return (n / 1073741824).toFixed(2) + ' GB';
+  if(n >= 1048576){ const m = n / 1048576; return (Number.isInteger(m) ? m : m.toFixed(1)) + ' MB'; }
+  if(n >= 1024){ const k = n / 1024; return (Number.isInteger(k) ? k : k.toFixed(1)) + ' KB'; }
+  return Math.round(n) + ' B';
+};
+const fmtPct1 = v => has(v) ? Number(v).toFixed(1) + '%' : '—';
+const fmtDuration = sec => {
+  if(!has(sec)) return '—';
+  const t = Math.floor(Number(sec));
+  const d = Math.floor(t / 86400), h = Math.floor(t % 86400 / 3600), m = Math.floor(t % 3600 / 60);
+  if(d > 0) return d + 'd ' + h + 'h';
+  if(h > 0) return h + 'h ' + String(m).padStart(2, '0') + 'm';
+  if(m > 0) return m + 'm';
+  return t + 's';
+};
+const H = {decode:[],prefill:[],gpu:[],vram:[],temp:[],power:[],cpu:[],disk:[],out:[]};
+function push(k,v){ H[k].push(v??null); if(H[k].length>30) H[k].shift(); }
+// Strata ReferenceSpark：100×32，面积 12% + 1.6px 线，空数据画虚线基线
+function spark(values, color, secondary){
+  const all=[...values, ...(secondary||[])].filter(v=>v!==null && v!==undefined);
+  if(!all.length) return '<svg viewBox="0 0 100 32" preserveAspectRatio="none"><path d="M0,28 L100,28" fill="none" stroke="currentColor" opacity=".35" stroke-dasharray="3 3" stroke-width="1"/></svg>';
+  const max=Math.max(...all,1);
+  const path=(vals)=>{
+    let p='', started=false;
+    vals.forEach((v,i)=>{
+      if(v===null || v===undefined){ started=false; return; }
+      const x=(i/(vals.length-1||1))*100, y=30-(v/max)*26;
+      p+=(started?'L':'M')+x.toFixed(2)+' '+y.toFixed(2)+' '; started=true;
+    });
+    return p;
+  };
+  const line=path(values);
+  const area=line+`L100 32L0 32Z`;
+  let out=`<svg viewBox="0 0 100 32" preserveAspectRatio="none"><path d="${area}" fill="${color}" opacity=".12"/><path d="${line}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>`;
+  if(secondary){
+    const l2=path(secondary);
+    out+=`<path d="${l2}L100 32L0 32Z" fill="#0a7a55" opacity=".12"/><path d="${l2}" fill="none" stroke="#0a7a55" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>`;
+  }
+  return out+'</svg>';
+}
+const PHASE = {idle:'idle', reading:'reading', generating:'generating', queued:'queued', error:'error'};
+function ninferToStrata(s){
+  if(!s.ninfer_ok) return 'error';
+  if(s.state==='warming') return 'reading';
+  if(s.state==='generating') return 'generating';
+  if(s.state==='queued') return 'queued';
+  return 'idle';
+}
+// 当前请求表（含过去 1 小时观测记录）：当前行来自快照（2 秒刷新），
+// 过去行来自 /api/request-history（10 秒节流，与事件同口径）：默认是面板的
+// /slots 观测记录；配了请求日志（PANEL_REQUEST_LOG）时优先用日志里的真实
+// 完成记录（含输出 token 与单请求速度）。过去行置灰，
+// 状态只用可观测的两种：进行中 / 已结束（结束原因 NInfer 未报告，不写已完成）。
+let _lastSnap = null, _pastReqs = [], _pastEndedCount = null, _lastMaxCtx = 0, _activeFirst = {}, _tableHist = [], _logReqs = [];
+// Window average for the requests table: the panel-wide average decode
+// rate over a request's window, from a 60-minute history fetch (throttled
+// with the request-history fetch). Not the request's own speed — NInfer
+// reports no per-request generated-token counts.
+function _avgDecodeWindow(first, last){
+  const ss = _tableHist.filter(p => p.decode !== null && p.decode !== undefined && p.t >= first && p.t <= last);
+  if(!ss.length) return null;
+  return ss.reduce((a, p) => a + p.decode, 0) / ss.length;
+}
+function _reqRowHtml(d, past, fromLog){
+  // Two past-row sources. Observation rows (default): duration and the
+  // window-average decode come from the panel's own /slots polling —
+  // NInfer reports no per-request output there, so the output column is
+  // '—' and the speed is the panel-wide window average (see reqAvgTip).
+  // Log rows (PANEL_REQUEST_LOG set): the request log carries the real
+  // completion count and decode seconds, so the speed is the request's
+  // own and the duration is TTFT + decode time.
+  const share = (!fromLog && _lastMaxCtx && d.prompt_tokens !== null && d.prompt_tokens !== undefined) ? (d.prompt_tokens / _lastMaxCtx * 100) : null;
+  let status;
+  if(!past) status = T().reqActive;
+  else if(fromLog) status = T().reqEnded.replace('{t}', new Date(d.t * 1000).toLocaleTimeString()) + (d.finish ? ' · ' + d.finish : '');
+  else status = T().reqEnded.replace('{t}', new Date(d.last * 1000).toLocaleTimeString());
+  const outCell = (fromLog && d.completion !== null && d.completion !== undefined)
+    ? '<td class="num" title="' + d.completion.toLocaleString() + '">' + fmtTok(d.completion) + '</td>'
+    : '<td class="num">—</td>';
+  let dur = '—', durTitle = '', avg = null, avgTitle = '';
+  if(fromLog){
+    if(d.ttft !== null && d.ttft !== undefined && d.decode_s !== null && d.decode_s !== undefined){
+      dur = fmtDuration(d.ttft + d.decode_s);
+      const parts = ['TTFT ' + fmtDuration(d.ttft)];
+      if(d.queue !== null && d.queue !== undefined) parts.push(T().rowTipQueue + ' ' + fmtDuration(d.queue));
+      parts.push(T().rowTipDecode + ' ' + fmtDuration(d.decode_s));
+      durTitle = ' title="' + parts.join(' · ') + '"';
+    } else if(d.ttft !== null && d.ttft !== undefined){
+      dur = fmtDuration(d.ttft);
+    }
+    if(d.completion !== null && d.completion !== undefined && d.decode_s > 0){
+      avg = d.completion / d.decode_s;
+      avgTitle = ' title="' + T().reqAvgRealTip + '"';
+    }
+  } else {
+    const end = past ? d.last : Date.now() / 1000;
+    if(d.first !== null && d.first !== undefined && end >= d.first) dur = fmtDuration(end - d.first);
+    if(d.first !== null && d.first !== undefined){
+      avg = _avgDecodeWindow(d.first, end);
+      if(avg !== null) avgTitle = ' title="' + T().reqAvgTip + '"';
+    }
+  }
+  const cachedTitle = ((d.cached_tokens !== null && d.cached_tokens !== undefined) ? d.cached_tokens.toLocaleString() : '') +
+    (fromLog && d.path ? ' · ' + T().reusePathLabel + ' ' + d.path : '');
+  const cachedCell = (d.cached_tokens === null || d.cached_tokens === undefined) ? '—'
+    : fmtTok(d.cached_tokens) + (d.prompt_tokens ? ' · ' + (d.cached_tokens / d.prompt_tokens * 100).toFixed(1) + '%' : '');
+  return '<tr' + (past ? ' class="req-past"' : '') + '><td>#' + ((d.id !== null && d.id !== undefined) ? d.id : '—') +
+    '</td><td class="num"' + ((d.prompt_tokens !== null && d.prompt_tokens !== undefined) ? ' title="' + d.prompt_tokens.toLocaleString() + '"' : '') + '>' + fmtTok(d.prompt_tokens) +
+    '</td>' + outCell +
+    '<td class="num" title="' + cachedTitle + '">' + cachedCell +
+    '</td><td class="num" title="' + (d.n_ctx ? d.n_ctx.toLocaleString() : '') + '">' + (d.n_ctx ? fmtTok(d.n_ctx) : '—') +
+    '</td><td class="num">' + (share !== null ? share.toFixed(1) + '%' : '—') +
+    '</td><td class="num"' + avgTitle + '>' + (avg !== null ? fmtRateNum(avg) + ' tok/s' : '—') +
+    '</td><td class="num"' + durTitle + '>' + dur + '</td><td>' + status + '</td></tr>';
+}
+function renderReqTable(s){
+  if(s.context && s.context.max_context) _lastMaxCtx = s.context.max_context;
+  const slots = s.slots || {};
+  const det = slots.processing_details || [];
+  const r = s.requests || {};
+  const useLog = _logReqs.length > 0;
+  const past = useLog
+    ? _logReqs.map(p => ({id: p.id, prompt_tokens: p.prompt, cached_tokens: p.cached, n_ctx: null, t: p.t, completion: p.completion, ttft: p.ttft, queue: p.queue, decode_s: p.decode_s, path: p.path, finish: p.finish}))
+    : _pastReqs.map(p => ({id: p.slot, prompt_tokens: p.prompt, cached_tokens: p.cached, n_ctx: p.n_ctx, first: p.first, last: p.last}));
+  const noteEl = $('reqHistoryNote');
+  if(noteEl) noteEl.textContent = useLog ? T().reqLogNote : T().reqHistoryNote;
+  const body = $('currentReqBody');
+  if(!s.ninfer_ok){
+    body.innerHTML = '<tr><td colspan="9" class="muted">' + T().curOffline + '</td></tr>' +
+      past.map(d => _reqRowHtml(d, true, useLog)).join('');
+  } else if(!det.length && !past.length){
+    body.innerHTML = '<tr><td colspan="9" class="muted">' + T().curNone +
+      ((r.waiting || 0) > 0 ? T().curQueued.replace('{n}', r.waiting) : '') + '</td></tr>';
+  } else {
+    body.innerHTML = det.map(d => _reqRowHtml({...d, first: (_activeFirst[d.id] !== undefined ? _activeFirst[d.id] : null)}, false, false)).join('') + past.map(d => _reqRowHtml(d, true, useLog)).join('');
+  }
+}
+let _lastReqHistFetch = 0;
+async function fetchReqHistory(){
+  const now = Date.now();
+  if(now - _lastReqHistFetch < 10000 && _pastReqs.length) return;
+  _lastReqHistFetch = now;
+  try{
+    const j = await (await fetch('/api/request-history')).json();
+    const all = j.requests || [];
+    _pastReqs = all.filter(x => x.status === 'ended').sort((a, b) => b.last - a.last);
+    const cutoff = Date.now() / 1000 - 3600;
+    _logReqs = (j.log_requests || []).filter(x => x.t >= cutoff).sort((a, b) => b.t - a.t);
+    _pastEndedCount = _logReqs.length ? _logReqs.length : _pastReqs.length;
+    _activeFirst = {};
+    all.filter(x => x.status === 'active').forEach(x => { _activeFirst[x.slot] = x.first; });
+    if(_lastSnap) renderReqTable(_lastSnap);
+  }catch(e){ /* past requests missing never breaks the main panel */ }
+  try{
+    const hj = await (await fetch('/api/history?minutes=60')).json();
+    _tableHist = hj.samples || [];
+    if(_lastSnap) renderReqTable(_lastSnap);
+  }catch(e){ /* window averages fall back to — */ }
+}
+let _prevOnline = null;
+async function tick(){
+  let s;
+  try{ s=await (await fetch('/api/snapshot')).json(); }catch(e){ s={ninfer_ok:false,state:'offline',error:String(e)}; }
+  const phase = ninferToStrata(s);
+  document.querySelectorAll('#badges .st-badge').forEach(b=>{
+    const active = b.dataset.phase===phase || (b.dataset.phase==='queued' && (s.requests?.waiting||0)>0);
+    b.dataset.active = active ? 'true' : 'false';
+    if(b.dataset.phase==='queued' && (s.requests?.waiting||0)>0) b.textContent=T().badgeQueued+' ('+s.requests.waiting+')';
+    else if(b.dataset.phase==='queued') b.textContent=T().badgeQueued;
+  });
+  $('titleDetail').textContent = s.model || T().noModel;
+  $('uptimeText').textContent = has(s.uptime_seconds) ? (T().uptimeLabel + ' ' + fmtDuration(s.uptime_seconds)) : '';
+  $('currentBase').textContent = s.ninfer_base_url || '—';
+  const err=$('err');
+  if(!s.ninfer_ok){ err.style.display='block'; err.textContent=T().errPrefix+(s.error||T().unknown)+T().errSuffix +
+    (s.last_ok ? ' · ' + T().lastOnline.replace('{t}', new Date(s.last_ok * 1000).toLocaleTimeString()) +
+    ' · ' + T().offlineFor.replace('{d}', fmtDuration(Math.max(0, Date.now() / 1000 - s.last_ok))) : ''); }
+  else err.style.display='none';
+  const r=s.requests||{}, inst=s.instant||{}, m=s.metrics||{}, ctx=s.context||{};
+  let phaseText, detail='';
+  if(phase==='idle'){ phaseText=T().phaseIdle; }
+  else if(phase==='reading'){ phaseText=T().phaseReading; detail=T().detailPrefilling.replace('{n}', r.prefilling); if(ctx.max_processing_prompt_tokens) detail+=T().detailLongest.replace('{x}', fmtTok(ctx.max_processing_prompt_tokens)); }
+  else if(phase==='generating'){ phaseText=T().phaseGenerating; detail=T().detailGenerating.replace('{d}', fmtRateNum(inst.decode_tok_s)).replace('{n}', r.running); }
+  else if(phase==='queued'){ phaseText=T().phaseQueued; detail=T().detailQueued.replace('{n}', r.waiting); }
+  else { phaseText=T().phaseError; detail=s.error||''; }
+  $('phaseText').textContent=phaseText; $('statusDetail').textContent=detail;
+  const bar=$('progressBar');
+  if(phase==='reading'||phase==='generating'){ bar.className='indet'+(phase==='reading'?' info':''); bar.style.width='40%'; $('progressNote').textContent=T().noProgress; }
+  else { bar.className=''; bar.style.width='0%'; $('progressNote').textContent=''; }
+  // 解码 / 预填充卡（0.1.4 起拆成两张，各画一条单线迷你曲线）
+  $('decode').textContent=fmtRateNum(inst.decode_tok_s);
+  $('prefill').textContent=fmtRateRaw(inst.prefill_tok_s);
+  $('decodeSub').textContent = phase==='generating' ? T().decodeSubDecoding : T().decodeSubLast;
+  $('prefillSub').textContent = phase==='reading' ? T().prefillSubReading : (phase==='generating' ? T().prefillSubGenerating : T().prefillSubLast);
+  $('decodeSource').textContent = s.ninfer_ok ? T().measured : T().unavailable;
+  $('prefillSource').textContent = s.ninfer_ok ? T().measured : T().unavailable;
+  push('decode', inst.decode_tok_s); push('prefill', inst.prefill_tok_s);
+  $('decodeSpark').innerHTML = spark(H.decode, '#10b981');
+  $('prefillSpark').innerHTML = spark(H.prefill, '#38bdf8');
+  // GPU 卡
+  const g=(s.gpu&&s.gpu.available)?s.gpu.cards[0]:null;
+  $('gpuLoad').textContent=g?fmt(g.util_percent,1):'—';
+  $('gpuLoadSub').textContent=g?g.name:T().unavailable;
+  $('gpuLoadSource').textContent=g?T().measured:T().unavailable;
+  $('vram').textContent=g?fmtBytes(g.mem_used_mb*1048576):'—';
+  $('vramUnit').textContent=g?(' / '+fmtBytes(g.mem_total_mb*1048576)):'';
+  $('vramSub').textContent=g?g.name:T().unavailable;
+  $('vramSource').textContent=g?T().measured:T().unavailable;
+  $('temp').textContent=g?fmt(g.temp_c,0):'—';
+  $('tempSub').textContent=g?g.name:T().unavailable;
+  $('tempSource').textContent=g?T().measured:T().unavailable;
+  $('power').textContent=g?fmt(g.power_w,0):'—';
+  $('powerSub').textContent=g?(has(g.power_limit_w)?('上限 '+fmt(g.power_limit_w,0)+' W'):T().powerGpu): T().unavailable;
+  $('powerSource').textContent=g?T().measured:T().unavailable;
+  $('pcie').textContent=g&&has(g.pcie_gen)?('Gen'+fmt(g.pcie_gen,0)):'—';
+  $('pcieUnit').textContent=g&&has(g.pcie_width)?('x'+fmt(g.pcie_width,0)):'';
+  $('pcieSub').textContent=g?(has(g.pcie_gen)?T().pcieLink:T().pcieUnavailable):T().pcieUnavailable;
+  $('pcieSource').textContent=g&&has(g.pcie_gen)?T().measured:T().unavailable;
+  push('gpu', g?g.util_percent:null); push('vram', g?g.mem_used_mb/1024:null); push('temp', g?g.temp_c:null); push('power', g?g.power_w:null);
+  $('gpuLoadSpark').innerHTML=spark(H.gpu,'#10b981');
+  $('vramSpark').innerHTML=spark(H.vram,'#10b981');
+  $('tempSpark').innerHTML=spark(H.temp,'#f59e0b');
+  $('powerSpark').innerHTML=spark(H.power,'#10b981');
+  $('pcieSpark').innerHTML=spark([null],'#38bdf8');
+  // CPU 卡
+  const cpu=s.host_cpu||{};
+  $('cpu').textContent=(cpu.available&&has(cpu.util_percent))?fmt(cpu.util_percent,1):'—';
+  $('cpuSub').textContent=cpu.available?(cpu.model?cpu.model+ (cpu.cores?' · '+cpu.cores+' 核':''):T().hostCpu):T().unavailable+'：'+(cpu.reason||T().unknown);
+  $('cpuSource').textContent=cpu.available?T().measured:T().unavailable;
+  push('cpu', cpu.available?cpu.util_percent:null);
+  $('cpuSpark').innerHTML=spark(H.cpu,'#10b981');
+  // 磁盘读取卡
+  const disk=s.host_disk||{};
+  const readMbs=disk.available?disk.read_mbs:null, writeMbs=disk.available?disk.write_mbs:null;
+  $('disk').textContent=has(readMbs)?(readMbs>=1024?fmt(readMbs/1024,2):fmt(readMbs,1)):'—';
+  $('diskUnit').textContent=has(readMbs)?(readMbs>=1024?'GB/s':'MB/s'):'';
+  $('diskSub').textContent=has(writeMbs)?((writeMbs>=1024?T().diskWriteGb.replace('{x}', fmt(writeMbs/1024,2)):T().diskWrite.replace('{x}', fmt(writeMbs,1)))):(disk.available?T().diskReadSub:T().unavailable+'：'+(disk.reason||T().unknown));
+  $('diskSource').textContent=disk.available?T().measured:T().unavailable;
+  push('disk', readMbs);
+  $('diskSpark').innerHTML=spark(H.disk,'#38bdf8');
+  const outTok = s.counters ? s.counters.decode_tokens : null;
+  $('outTokens').textContent = has(outTok) ? fmtTok(outTok) : '—';
+  $('outTokensSub').textContent = has(outTok) ? T().outTokensSub : T().unavailable;
+  $('outTokensSource').textContent = has(outTok) ? T().measured : T().unavailable;
+  push('out', has(outTok) ? outTok : null);
+  $('outTokensSpark').innerHTML = spark(H.out, '#10b981');
+  // 上下文占用表
+  const pct = ctx.max_prompt_share_percent;
+  $('gaugePct').textContent=fmtPct1(pct);
+  $('gaugeSub').textContent=ctx.max_processing_prompt_tokens?(T().gaugeLongest.replace('{a}', fmtTok(ctx.max_processing_prompt_tokens)).replace('{b}', fmtTok(ctx.max_context))):T().gaugeNoReq;
+  $('gaugeArc').setAttribute('stroke-dasharray', (has(pct)?(235.6*pct/100).toFixed(1):0)+' 314.2');
+  $('kvBarText').textContent=has(ctx.kv_used_percent)?(fmtTok(ctx.kv_tokens)+' / '+fmtTok(ctx.kv_capacity_tokens)):'—';
+  $('kvBar').style.width=has(ctx.kv_used_percent)?Math.min(100,ctx.kv_used_percent)+'%':'0%';
+  const hm=s.host_memory||{};
+  $('ramBarText').textContent=hm.available?(fmtBytes(hm.used_mb*1048576)+' / '+fmtBytes(hm.total_mb*1048576)):'—';
+  $('ramBar').style.width=hm.available&&has(hm.used_percent)?Math.min(100,hm.used_percent)+'%':'0%';
+  $('tempBarText').textContent=g?fmt(g.temp_c,0)+' °C':'—';
+  $('tempBar').style.width=g&&has(g.temp_c)?Math.min(100,g.temp_c/90*100)+'%':'0%';
+  // 当前请求表（含过去 1 小时观测记录）由 renderReqTable 画：当前行来自
+  // 快照，过去行来自 /api/request-history。slots 仍留给对话缓存与合计行用。
+  const slots=s.slots||{};
+  _lastSnap = s;
+  renderReqTable(s);
+  // 对话缓存
+  $('parkedText').textContent=(slots.retained??'—')+' / '+(slots.total??'—');
+  $('parkedBar').style.width=(slots.total)?(slots.retained/slots.total*100)+'%':'0%';
+  const hkv=ctx.host_kv_bytes, hkvCap=ctx.host_kv_capacity_bytes;
+  $('cacheMemText').textContent=(hkv&&hkvCap)?(fmtBytes(hkv)+' / '+fmtBytes(hkvCap)):'—';
+  $('cacheMemBar').style.width=(hkv&&hkvCap)?Math.min(100,hkv/hkvCap*100)+'%':'0%';
+  $('lastCacheText').textContent=(s.counters&&s.counters.reused_prompt_tokens)?(T().lastCacheReuse.replace('{x}', fmtTok(s.counters.reused_prompt_tokens))):T().reuseNotReported;
+  $('reusedTotalText').textContent=(s.counters&&s.counters.reused_prompt_tokens)?fmtTok(s.counters.reused_prompt_tokens):'—';
+  // Context-cache pressure / reuse paths / transfers (from /stats; only
+  // present on builds that report context_cache). Each line appears only
+  // when its numbers were actually reported.
+  const ce = s.cache_extra || {};
+  const ceLines = [];
+  {
+    const parts = [];
+    if(ce.evicted !== null && ce.evicted !== undefined) parts.push(T().evictLabel + ' ' + fmtTok(ce.evicted));
+    if(ce.demoted !== null && ce.demoted !== undefined) parts.push(T().demoteLabel + ' ' + fmtTok(ce.demoted));
+    if(ce.spill_pages !== null && ce.spill_pages !== undefined) parts.push(T().spillLabel + ' ' + fmtTok(ce.spill_pages));
+    if(ce.checkpoints_dropped !== null && ce.checkpoints_dropped !== undefined) parts.push(T().ckptLabel + ' ' + fmtTok(ce.checkpoints_dropped));
+    if(parts.length) ceLines.push(T().pressureLabel + '：' + parts.join(' · '));
+  }
+  if(ce.selections){
+    const ents = Object.entries(ce.selections).map(([k, v]) => k.replace(/_/g, ' ') + ' ' + fmtTok(v));
+    if(ents.length) ceLines.push(T().reusePathsLabel + '：' + ents.join(' · '));
+  }
+  {
+    const parts = [];
+    if(ce.transfer_d2h_bytes !== null && ce.transfer_d2h_bytes !== undefined) parts.push(T().d2hLabel + ' ' + fmtBytes(ce.transfer_d2h_bytes));
+    if(ce.transfer_h2d_bytes !== null && ce.transfer_h2d_bytes !== undefined) parts.push(T().h2dLabel + ' ' + fmtBytes(ce.transfer_h2d_bytes));
+    if(parts.length) ceLines.push(T().transfersLabel + '：' + parts.join(' · '));
+  }
+  const ceEl = $('cacheExtra');
+  ceEl.replaceChildren(...ceLines.map(l => { const dv = document.createElement('div'); dv.textContent = l; return dv; }));
+  ceEl.style.display = ceLines.length ? '' : 'none';
+  if(m.requests_total!==undefined && m.requests_total!==null){
+    $('requestTotals').textContent=T().requestTotals.replace('{total}', m.requests_total).replace('{d}', fmtRateNum(m.avg_decode_tok_s)).replace('{p}', fmtRateRaw(m.avg_prefill_tok_s)).replace('{r}', (s.counters?.reused_prompt_tokens?fmtTok(s.counters.reused_prompt_tokens):'—')).replace('{cur}', (slots.processing||0)).replace('{q}', (r.waiting||0)) + (_pastEndedCount !== null ? T().reqPastEnded.replace('{n}', _pastEndedCount) : '')
+      + (m.requests_failed_total > 0 ? T().reqFailedPart.replace('{n}', m.requests_failed_total) : '')
+      + (m.requests_rejected_total > 0 ? T().reqRejectedPart.replace('{n}', m.requests_rejected_total) : '');
+  }
+  fetchHistory().then(drawHistory);
+  if(_prevOnline === true && !s.ninfer_ok){
+    const chk = $('notifyOfflineChk');
+    if(chk && chk.checked && 'Notification' in window && Notification.permission === 'granted'){
+      try{ new Notification(T().notifyOfflineTitle, {body: T().notifyOfflineBody}); }catch(e){}
+    }
+  }
+  _prevOnline = !!s.ninfer_ok;
+}
+let _updateData = null;
+function renderUpdateBanner(){
+  const b = $('updateBanner');
+  if(_updateData && _updateData.update_available && _updateData.url){
+    b.style.display = 'block';
+    b.innerHTML = '';
+    b.appendChild(document.createTextNode(T().updateAvailable.replace('{v}', _updateData.latest) + ' '));
+    const a = document.createElement('a');
+    a.href = _updateData.url; a.target = '_blank'; a.rel = 'noopener';
+    a.textContent = T().viewRelease; b.appendChild(a);
+  } else {
+    b.style.display = 'none';
+  }
+}
+async function fetchVersion(){
+  try{
+    const v = await (await fetch('/api/version')).json();
+    $('versionText').textContent = T().versionLabel + ' v' + v.version +
+      (v.update_check_enabled ? '' : T().updateCheckOff);
+  }catch(e){ /* 版本缺失不影响主面板 */ }
+  try{
+    _updateData = await (await fetch('/api/update-check')).json();
+    renderUpdateBanner();
+  }catch(e){ /* 检查失败时横幅保持隐藏，不报错 */ }
+}
+async function loadSettings(){
+  try{
+    const j = await (await fetch('/api/settings')).json();
+    $('baseUrlInput').value = j.ninfer_base_url || '';
+    $('currentBase').textContent = j.ninfer_base_url || '—';
+  }catch(e){ /* 设置缺失不影响主面板 */ }
+}
+$('saveBaseBtn').addEventListener('click', async () => {
+  const msg = $('settingsMsg');
+  try{
+    const resp = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ninfer_base_url: $('baseUrlInput').value.trim()})});
+    if(!resp.ok) throw new Error('bad');
+    const j = await resp.json();
+    $('currentBase').textContent = j.ninfer_base_url;
+    msg.style.color = 'var(--st-accent-text)'; msg.textContent = T().saved;
+  }catch(e){
+    msg.style.color = 'var(--st-danger-text)'; msg.textContent = T().invalidAddress;
+  }
+});
+const _settingsModal = $('settingsModal');
+const _closeSettings = () => _settingsModal.classList.remove('open');
+$('settingsBtn').addEventListener('click', () => { _settingsModal.classList.add('open'); $('baseUrlInput').focus(); });
+$('settingsCloseBtn').addEventListener('click', _closeSettings);
+_settingsModal.addEventListener('click', e => { if(e.target === _settingsModal) _closeSettings(); });
+document.addEventListener('keydown', e => { if(e.key === 'Escape') _closeSettings(); });
+loadSettings(); fetchVersion();
+window.addEventListener('resize', drawHistory);
+// Settings: test-connection (health only, no API key, never auto-saves).
+$('testConnBtn').addEventListener('click', async () => {
+  const msg = $('testConnMsg');
+  const base = $('baseUrlInput').value.trim() || $('currentBase').textContent;
+  try{
+    const resp = await fetch('/api/test-connection?base_url=' + encodeURIComponent(base));
+    const j = await resp.json();
+    if(!resp.ok) throw new Error(j.error || 'bad');
+    if(j.ok){ msg.style.color = 'var(--st-accent-text)'; msg.textContent = T().testConnOk.replace('{s}', j.http); }
+    else { msg.style.color = 'var(--st-danger-text)'; msg.textContent = T().testConnFail.replace('{e}', j.error || ''); }
+  }catch(e){
+    msg.style.color = 'var(--st-danger-text)'; msg.textContent = T().testConnFail.replace('{e}', String(e));
+  }
+});
+// Settings: manual update check (force=1 bypasses the backend 1h cache).
+$('checkUpdateBtn').addEventListener('click', async () => {
+  const msg = $('updateCheckMsg');
+  try{
+    _updateData = await (await fetch('/api/update-check?force=1')).json();
+    renderUpdateBanner();
+    if(!_updateData.enabled) msg.textContent = T().updateCheckOff;
+    else if(_updateData.update_available) msg.textContent = T().updateAvailable.replace('{v}', _updateData.latest);
+    else msg.textContent = T().updateLatest;
+  }catch(e){
+    msg.textContent = T().updateCheckFailed;
+  }
+});
+// Offline notification: opt-in, stored locally. Permission is only
+// requested on this toggle (a user gesture); a denial unchecks it.
+const notifyChk = $('notifyOfflineChk');
+try{ notifyChk.checked = localStorage.getItem('ninfer-panel-notify-offline') === '1'; }catch(e){}
+notifyChk.addEventListener('change', async () => {
+  if(notifyChk.checked && 'Notification' in window && Notification.permission === 'default'){
+    const perm = await Notification.requestPermission();
+    if(perm !== 'granted') notifyChk.checked = false;
+  }
+  try{ localStorage.setItem('ninfer-panel-notify-offline', notifyChk.checked ? '1' : '0'); }catch(e){}
+});
+// PCIe card visibility: opt-in hide, stored locally like other view prefs.
+// Default is shown; hiding only removes the card from the grid, polling
+// and snapshots are untouched.
+const hideDiskChk = $('hideDiskChk');
+function applyDiskVisibility(){ const card = $('diskCard'); if(card) card.style.display = hideDiskChk.checked ? 'none' : ''; }
+try{ hideDiskChk.checked = localStorage.getItem('ninfer-panel-hide-disk') === '1'; }catch(e){}
+applyDiskVisibility();
+hideDiskChk.addEventListener('change', () => {
+  try{ localStorage.setItem('ninfer-panel-hide-disk', hideDiskChk.checked ? '1' : '0'); }catch(e){}
+  applyDiskVisibility();
+});
+const hidePcieChk = $('hidePcieChk');
+function applyPcieVisibility(){ const card = $('pcieCard'); if(card) card.style.display = hidePcieChk.checked ? 'none' : ''; }
+try{ hidePcieChk.checked = localStorage.getItem('ninfer-panel-hide-pcie') === '1'; }catch(e){}
+applyPcieVisibility();
+hidePcieChk.addEventListener('change', () => {
+  try{ localStorage.setItem('ninfer-panel-hide-pcie', hidePcieChk.checked ? '1' : '0'); }catch(e){}
+  applyPcieVisibility();
+});
+// Display refresh interval only (backend sampling stays at its own POLL).
+// Stored in localStorage; the backend history point density is unaffected.
+let pollMs = (() => {
+  try{
+    const v = parseInt(localStorage.getItem('ninfer-panel-poll-ms'), 10);
+    if(v >= 1000 && v <= 10000) return v;
+  }catch(e){}
+  return 2000;
+})();
+let pollTimer = null;
+function restartPoll(){
+  if(pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(() => { tick(); fetchEvents(); fetchReqHistory(); }, pollMs);
+}
+$('pollIntervalInput').value = pollMs / 1000;
+$('pollIntervalInput').addEventListener('change', () => {
+  let sec = parseInt($('pollIntervalInput').value, 10);
+  if(!isFinite(sec)) sec = 2;
+  sec = Math.max(1, Math.min(10, sec));
+  $('pollIntervalInput').value = sec;
+  pollMs = sec * 1000;
+  try{ localStorage.setItem('ninfer-panel-poll-ms', String(pollMs)); }catch(e){}
+  restartPoll();
+});
+// History export: CSV from the samples already fetched for this window.
+$('exportHistBtn').addEventListener('click', () => {
+  const lastT = histSamples.length ? histSamples[histSamples.length - 1].t : Date.now() / 1000;
+  const t1 = Math.max(Date.now() / 1000, lastT);
+  const t0 = t1 - histMinutes * 60;
+  const COL = {decode:'decode_tok_s', prefill:'prefill_tok_s', kv:'kv_pct', gpu:'gpu_pct', cum:'cum_decode_tokens', accept:'spec_accept_pct'};
+  const FIELD = {decode:'decode', prefill:'prefill', kv:'kv', gpu:'gpu', cum:'out', accept:'accept'};
+  const header = ['time', ...histDims.map(d => COL[d])].join(',');
+  const lines = [header];
+  histSamples.filter(p => p.t >= t0).forEach(p => {
+    lines.push([new Date(p.t * 1000).toISOString(), ...histDims.map(d => { const v = p[FIELD[d]]; return (v === null || v === undefined) ? '' : v; })].join(','));
+  });
+  const blob = new Blob([lines.join('\n')], {type: 'text/csv'});
+  const a = document.createElement('a');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
+  a.href = URL.createObjectURL(blob);
+  a.download = `ninfer-history-${histMinutes}min-${stamp}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+// State events: throttled to at most one fetch per 10 s; missing data
+// never breaks the main panel.
+let _lastEventsFetch = 0, _eventsCache = [];
+function stateLabel(s){
+  return {idle:T().badgeIdle, warming:T().badgeReading, generating:T().badgeGenerating,
+    queued:T().badgeQueued, offline:T().badgeError}[s] || s;
+}
+function renderEvents(){
+  const ul = $('eventList'), empty = $('eventsEmpty');
+  ul.innerHTML = '';
+  const recent = [..._eventsCache].reverse().slice(0, 20);
+  empty.style.display = recent.length ? 'none' : 'block';
+  recent.forEach(e => {
+    const li = document.createElement('li');
+    li.textContent = new Date(e.t * 1000).toLocaleString() + ' ' +
+      stateLabel(e.from) + ' → ' + stateLabel(e.to) + (e.error ? ' · ' + e.error : '');
+    ul.appendChild(li);
+  });
+}
+async function fetchEvents(){
+  const now = Date.now();
+  if(now - _lastEventsFetch < 10000 && _eventsCache.length) return;
+  _lastEventsFetch = now;
+  try{
+    const j = await (await fetch('/api/events')).json();
+    _eventsCache = j.events || [];
+    renderEvents();
+  }catch(e){ /* events missing never breaks the main panel */ }
+}
+// Spark seeding: on load, seed the page-local spark buffers from the
+// persisted backend history (last 30 points of a 5-minute window), then
+// live ticks keep appending. A refresh therefore no longer wipes any
+// card sparkline. PCIe has no numeric series (link info only), so its
+// sparkline stays a dashed baseline.
+async function seedSparks(){
+  try{
+    const j = await (await fetch('/api/history?minutes=5')).json();
+    const s = (j.samples || []).slice(-30);
+    if(s.length){
+      H.decode = s.map(p => p.decode);
+      H.prefill = s.map(p => p.prefill);
+      H.gpu = s.map(p => p.gpu);
+      H.vram = s.map(p => p.vram);
+      H.temp = s.map(p => p.temp);
+      H.power = s.map(p => p.power);
+      H.cpu = s.map(p => p.cpu);
+      H.disk = s.map(p => p.disk);
+      H.out = s.map(p => p.out);
+    }
+  }catch(e){ /* seeding is best-effort; live ticks fill the sparklines anyway */ }
+}
+seedSparks().finally(() => { tick(); fetchEvents(); fetchReqHistory(); restartPoll(); });
+</script>
+<script>
+// ---- ninfer-console v0.1（管理视图，只读预览）----
+// 数据全部来自 /api/console*；本段代码不调用任何会改变 NInfer 或
+// Docker 状态的接口。表单与后端的唯一事实源都是 console_core 的
+// PARAM_SCHEMA：字段、顺序、范围不在前端另抄一份。
+const MG = {data: null, preview: null, draftTimer: null};
+const mgT = () => T();
+const mgLang = () => (LANG === 'en' ? 'en' : 'zh');
+const mgNote = obj => obj.note || '';
+const mgLabel = obj => obj.label || obj.id || '';
+const mgMsg = issue => (mgLang() === 'en' ? issue.message_en : issue.message_zh);
+const mgFieldLabel = key => mgT()['mgF_' + key] || key;
+const mgModelById = id => (MG.data ? MG.data.models.find(m => m.id === id) : null);
+
+function switchView(name){
+  const manage = name === 'manage';
+  // 页头（标题 + 视图切换 + 设置）与设置弹窗在两个视图里都要在：
+  // 只藏监控栈的内容区，页头藏了用户就回不来了。
+  document.querySelectorAll('.monitor-dashboard > *').forEach(ch => {
+    if(ch.classList.contains('page-head') || ch.classList.contains('modal')) return;
+    ch.style.display = manage ? 'none' : '';
+  });
+  $('manageView').style.display = manage ? '' : 'none';
+  $('viewMonitorBtn').dataset.active = manage ? 'false' : 'true';
+  $('viewManageBtn').dataset.active = manage ? 'true' : 'false';
+  try{ localStorage.setItem('ninfer-panel-view', name); }catch(e){}
+  if(manage && !MG.data) loadConsole();
+}
+$('viewMonitorBtn').addEventListener('click', () => switchView('monitor'));
+$('viewManageBtn').addEventListener('click', () => switchView('manage'));
+
+async function loadConsole(){
+  try{
+    MG.data = await (await fetch('/api/console')).json();
+    const start = MG.data.draft || MG.data.current.config;
+    if(MG.data.draft) $('mgDraftNote').style.display = '';
+    renderConsoleAll(JSON.parse(JSON.stringify(start)));
+  }catch(e){ /* 管理面加载失败不影响监控面 */ }
+}
+
+function renderConsoleAll(cfg){
+  renderProblems(); renderRunCard(); renderModels(); renderPresets(); buildForm(cfg); renderHistory();
+  refreshPreview();
+}
+
+function renderProblems(){
+  const box = $('mgProblems');
+  const probs = (MG.data && MG.data.registry_problems) || [];
+  box.style.display = probs.length ? '' : 'none';
+  box.textContent = probs.length ? mgT().mgProblemsTitle + ' ' + probs.join('；') : '';
+}
+
+$('mgSaveCurrentBtn').addEventListener('click', async () => {
+  const cfg = collectForm();
+  try{
+    const resp = await fetch('/api/console/current', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({config: cfg})});
+    if(!resp.ok) return;
+    MG.data = await (await fetch('/api/console')).json();
+    renderConsoleAll(JSON.parse(JSON.stringify(cfg)));
+  }catch(e){ /* 保存失败保持现状，校验区会继续显示问题 */ }
+});
+
+function renderRunCard(){
+  const d = MG.data, cur = d.current.config;
+  const m = mgModelById(cur.model);
+  $('mgRunModel').textContent = m ? m.name : (cur.model || '—');
+  $('mgRunImage').textContent = cur.image || '—';
+  $('mgRunInflight').textContent = (d.live && d.live.in_flight !== null && d.live.in_flight !== undefined) ? d.live.in_flight : '—';
+  $('mgRunSource').textContent = mgT()['mgSrc_' + (d.current.source || '')] || d.current.source || '—';
+  const st = $('mgRunState');
+  st.textContent = d.live && d.live.ninfer_ok ? stateLabel(d.live.state || 'idle') : mgT().badgeError;
+  st.className = 'mg-badge ' + (d.live && d.live.ninfer_ok ? 'on' : 'danger');
+  const chk = $('mgLiveCheck');
+  if(!d.live || !d.live.ninfer_ok){
+    chk.textContent = mgT().mgLiveUnknown;
+  } else {
+    const bad = (d.live.checks || []).filter(c => c.match === false).map(c => mgFieldLabel(c.key));
+    if(d.live.model_match === false) bad.push(mgFieldLabel('model'));
+    chk.textContent = bad.length ? mgT().mgLiveMismatch.replace('{x}', bad.join(', ')) : mgT().mgLiveOk;
+    chk.style.color = bad.length ? 'var(--st-warn-text)' : '';
+  }
+}
+
+function renderModels(){
+  const d = MG.data;
+  $('mgModelsNote').textContent = d.models_dir.configured ? mgT().mgModelsDirMounted : mgT().mgModelsDirNotMounted;
+  const wrap = $('mgModelList');
+  wrap.innerHTML = '';
+  d.models.forEach(m => {
+    const row = document.createElement('div');
+    row.className = 'mg-model-row';
+    if(m.id && MG._formModel === m.id && !m.is_current){
+      row.style.background = 'var(--st-info-tint)';
+      row.style.borderRadius = '12px';
+      row.style.paddingLeft = '12px'; row.style.paddingRight = '12px';
+    }
+    const left = document.createElement('div');
+    const nm = document.createElement('div'); nm.className = 'mg-model-name'; nm.textContent = m.name;
+    const meta = document.createElement('div'); meta.className = 'mg-model-meta num';
+    const size = (m.size_gb !== null && m.size_gb !== undefined) ? (Math.round(m.size_gb * 100) / 100) + ' GB' : '—';
+    const bits = [size];
+    if(m.source === 'discovered') bits.push(mgT().mgDiscovered);
+    if(mgNote(m)) bits.push(mgNote(m));
+    meta.textContent = bits.join(' · ');
+    left.append(nm, meta); row.appendChild(left);
+    const comps = [['vision','Vision'], ['dflash2','DFlash2'], ['mtp','MTP']];
+    comps.forEach(([k, label]) => {
+      if(m.components && m.components[k]){
+        const b = document.createElement('span'); b.className = 'mg-badge info'; b.textContent = label; row.appendChild(b);
+      }
+    });
+    const sp = document.createElement('span'); sp.className = 'spacer'; row.appendChild(sp);
+    if(m.is_current){
+      const b = document.createElement('span'); b.className = 'mg-badge on'; b.textContent = mgT().mgCurrentBadge; row.appendChild(b);
+    } else if(m.present === false){
+      const b = document.createElement('span'); b.className = 'mg-badge danger'; b.textContent = mgT().mgAbsentBadge; row.appendChild(b);
+    } else if(m.id){
+      const btn = document.createElement('button');
+      btn.className = 'mg-btn'; btn.type = 'button'; btn.textContent = mgT().mgSelect;
+      btn.addEventListener('click', () => {
+        const cfg = collectForm(); cfg.model = m.id; normalizeLinkages(cfg, 'model');
+        setFormValues(cfg); onFormEdited();
+      });
+      row.appendChild(btn);
+    }
+    wrap.appendChild(row);
+  });
+}
+
+function renderPresets(){
+  const sel = $('mgPresetSel');
+  sel.innerHTML = '';
+  const ph = document.createElement('option'); ph.value = ''; ph.textContent = mgT().mgPresetPlaceholder; sel.appendChild(ph);
+  MG.data.presets.forEach(p => {
+    const o = document.createElement('option'); o.value = p.id; o.textContent = mgLabel(p); sel.appendChild(o);
+  });
+}
+$('mgPresetLoad').addEventListener('click', () => {
+  const id = $('mgPresetSel').value;
+  if(!id) return;
+  const p = MG.data.presets.find(x => x.id === id);
+  if(!p) return;
+  const cfg = JSON.parse(JSON.stringify(p.config));
+  buildForm(cfg); onFormEdited();
+});
+
+const MG_GROUPS = ['basic', 'context', 'sched', 'spec', 'advanced'];
+function buildForm(cfg){
+  const form = $('mgForm');
+  form.innerHTML = '';
+  MG_GROUPS.forEach(g => {
+    const fields = MG.data.schema.filter(f => f.group === g);
+    if(!fields.length) return;
+    const sec = document.createElement('div'); sec.className = 'mg-group';
+    const h = document.createElement('h3'); h.textContent = mgT()['mgG_' + g] || g; sec.appendChild(h);
+    const grid = document.createElement('div'); grid.className = 'mg-grid';
+    fields.forEach(f => grid.appendChild(buildField(f)));
+    sec.appendChild(grid); form.appendChild(sec);
+  });
+  setFormValues(cfg);
+}
+function buildField(f){
+  const wrap = document.createElement('div');
+  wrap.className = 'mg-field'; wrap.dataset.key = f.key;
+  if(f.kind !== 'bool'){
+    const lab = document.createElement('label'); lab.textContent = mgFieldLabel(f.key); wrap.appendChild(lab);
+  }
+  let ctl = null;
+  if(f.kind === 'bool'){
+    const box = document.createElement('div'); box.className = 'chk';
+    ctl = document.createElement('input'); ctl.type = 'checkbox'; ctl.dataset.key = f.key;
+    const span = document.createElement('span'); span.textContent = mgFieldLabel(f.key);
+    box.append(ctl, span); wrap.appendChild(box);
+  } else if(f.kind === 'model'){
+    ctl = document.createElement('select'); ctl.className = 'ctl'; ctl.dataset.key = f.key;
+    MG.data.models.filter(m => m.id).forEach(m => {
+      const o = document.createElement('option'); o.value = m.id; o.textContent = m.name; ctl.appendChild(o);
+    });
+    wrap.appendChild(ctl);
+  } else if(f.kind === 'enum'){
+    ctl = document.createElement('select'); ctl.className = 'ctl'; ctl.dataset.key = f.key;
+    if(f.nullable){ const o = document.createElement('option'); o.value = ''; o.textContent = '—'; ctl.appendChild(o); }
+    (f.choices || []).forEach(c => {
+      const o = document.createElement('option'); o.value = c; o.textContent = mgT()['mgEnum_' + f.key + '_' + c] || c; ctl.appendChild(o);
+    });
+    wrap.appendChild(ctl);
+  } else if(f.kind === 'int_or_auto'){
+    ctl = document.createElement('input'); ctl.className = 'ctl'; ctl.dataset.key = f.key;
+    ctl.type = 'text'; ctl.inputMode = 'numeric'; wrap.appendChild(ctl);
+  } else if(f.kind === 'int'){
+    ctl = document.createElement('input'); ctl.className = 'ctl'; ctl.dataset.key = f.key;
+    ctl.type = 'number'; if(f.min !== undefined) ctl.min = f.min; if(f.max !== undefined) ctl.max = f.max;
+    wrap.appendChild(ctl);
+  } else {
+    ctl = document.createElement('input'); ctl.className = 'ctl'; ctl.dataset.key = f.key;
+    ctl.type = 'text'; wrap.appendChild(ctl);
+  }
+  const hint = document.createElement('div'); hint.className = 'hint'; hint.dataset.hint = f.key; wrap.appendChild(hint);
+  if(ctl){
+    ctl.addEventListener('change', () => onFormEdited(f.key));
+    ctl.addEventListener('input', () => onFormEdited(f.key, true));
+  }
+  return wrap;
+}
+function mgCtl(key){ return document.querySelector('#mgForm select[data-key="' + key + '"], #mgForm input[data-key="' + key + '"]'); }
+function setFormValues(cfg){
+  MG._formModel = cfg.model;
+  MG.data.schema.forEach(f => {
+    const ctl = mgCtl(f.key);
+    if(!ctl) return;
+    const v = cfg[f.key];
+    if(f.kind === 'bool') ctl.checked = !!v;
+    else if(f.kind === 'int' || f.kind === 'int_or_auto') ctl.value = (v === null || v === undefined) ? '' : v;
+    else ctl.value = (v === null || v === undefined) ? '' : v;
+  });
+  applyFieldStates(cfg); markChanged(cfg);
+}
+function collectForm(){
+  const cfg = {};
+  MG.data.schema.forEach(f => {
+    const ctl = mgCtl(f.key);
+    if(!ctl){ cfg[f.key] = null; return; }
+    if(f.kind === 'bool') cfg[f.key] = ctl.checked;
+    else if(f.kind === 'int'){
+      const raw = ctl.value.trim();
+      cfg[f.key] = raw === '' ? null : (Number.isFinite(parseInt(raw, 10)) ? parseInt(raw, 10) : raw);
+    } else if(f.kind === 'int_or_auto'){
+      const raw = ctl.value.trim();
+      cfg[f.key] = raw === '' ? null : (raw === 'auto' ? 'auto' : (Number.isFinite(parseInt(raw, 10)) ? parseInt(raw, 10) : raw));
+    } else if(f.kind === 'enum' || f.kind === 'model' || f.kind === 'image'){
+      cfg[f.key] = ctl.value === '' ? null : ctl.value;
+    } else {
+      const raw = ctl.value.trim();
+      cfg[f.key] = raw === '' ? null : raw;
+    }
+  });
+  return cfg;
+}
+function normalizeLinkages(cfg, changedKey){
+  const m = mgModelById(cfg.model);
+  if(m){
+    if(cfg.spec && cfg.spec !== 'none' && !(m.specs || []).includes(cfg.spec)) cfg.spec = m.default_spec || 'none';
+    if(cfg.vision && m.components && m.components.vision === false) cfg.vision = false;
+  }
+  if(cfg.spec !== 'dflash2') cfg.draft_tokens = null;
+  if(cfg.cache_mode === 'hybrid') cfg.host_kv_mib = null;
+  if(cfg.cache_mode === 'catalog') cfg.host_cache_mib = null;
+  if(!cfg.vision) cfg.vision_residency = null;
+  return cfg;
+}
+function applyFieldStates(cfg){
+  const dis = (key, off) => {
+    const ctl = mgCtl(key); if(!ctl) return;
+    ctl.disabled = off;
+    const wrap = ctl.closest('.mg-field'); if(wrap) wrap.classList.toggle('disabled', off);
+  };
+  dis('draft_tokens', cfg.spec !== 'dflash2');
+  dis('host_cache_mib', cfg.cache_mode !== 'hybrid');
+  dis('host_kv_mib', cfg.cache_mode !== 'catalog');
+  dis('vision_residency', !cfg.vision);
+}
+function mgDisplayVal(key, v){
+  if(v === null || v === undefined) return mgT().mgRemoved;
+  if(key === 'model'){ const m = mgModelById(v); return m ? m.name : v; }
+  if(typeof v === 'boolean') return v ? '✓' : '—';
+  return String(v);
+}
+function markChanged(cfg){
+  const cur = MG.data.current.config;
+  MG.data.schema.forEach(f => {
+    const wrap = document.querySelector('#mgForm .mg-field[data-key="' + f.key + '"]');
+    if(!wrap) return;
+    const changed = cfg[f.key] !== cur[f.key];
+    wrap.classList.toggle('changed', changed);
+    const hint = wrap.querySelector('[data-hint]');
+    if(hint) hint.textContent = changed ? mgT().mgOriginal.replace('{x}', mgDisplayVal(f.key, cur[f.key])) : '';
+  });
+}
+function onFormEdited(changedKey, soft){
+  let cfg = collectForm();
+  if(changedKey) cfg = normalizeLinkages(cfg, changedKey);
+  setFormValues(cfg);
+  renderModels();
+  refreshPreview();
+  if(!soft) scheduleDraftSave(cfg);
+  else scheduleDraftSave(cfg);
+}
+function scheduleDraftSave(cfg){
+  if(MG.draftTimer) clearTimeout(MG.draftTimer);
+  MG.draftTimer = setTimeout(async () => {
+    const cur = MG.data.current.config;
+    const same = MG.data.schema.every(f => cfg[f.key] === cur[f.key]);
+    try{
+      await fetch('/api/console/draft', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({config: same ? null : cfg})});
+      $('mgDraftNote').style.display = same ? 'none' : '';
+    }catch(e){ /* 草稿保存失败不影响预览 */ }
+  }, 800);
+}
+$('mgDraftClear').addEventListener('click', async () => {
+  try{ await fetch('/api/console/draft', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({config: null})}); }catch(e){}
+  $('mgDraftNote').style.display = 'none';
+  buildForm(JSON.parse(JSON.stringify(MG.data.current.config)));
+  refreshPreview();
+});
+async function refreshPreview(){
+  if(!MG.data) return;
+  const cfg = collectForm();
+  try{
+    const resp = await fetch('/api/console/preview', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({config: cfg})});
+    MG.preview = await resp.json();
+  }catch(e){ return; }
+  const box = $('mgIssues');
+  box.innerHTML = '';
+  const p = MG.preview;
+  (p.errors || []).forEach(i => { const dv = document.createElement('div'); dv.className = 'err'; dv.textContent = '✕ ' + mgMsg(i); box.appendChild(dv); });
+  (p.warnings || []).forEach(i => { const dv = document.createElement('div'); dv.className = 'wrn'; dv.textContent = '⚠ ' + mgMsg(i); box.appendChild(dv); });
+  if(!(p.errors || []).length){
+    const dv = document.createElement('div'); dv.className = 'ok'; dv.textContent = '✓ ' + mgT().mgValidOk; box.appendChild(dv);
+  }
+  const n = (p.diff || []).length;
+  const badge = $('mgChangeCount');
+  badge.style.display = n ? '' : 'none';
+  badge.textContent = mgT().mgChangesCount.replace('{n}', n);
+  $('mgPreviewBtn').disabled = !(p.ok && n);
+  $('mgSaveCurrentBtn').disabled = !p.ok;
+  if($('mgDiffModal').classList.contains('open')) renderDiff();
+}
+function renderHistory(){
+  const tb = $('mgHistoryBody');
+  tb.innerHTML = '';
+  MG.data.history.forEach((h, idx) => {
+    const cfg = h.config;
+    const tr = document.createElement('tr');
+    const cells = [
+      h.t_label,
+      mgDisplayVal('model', cfg.model),
+      mgDisplayVal('image', cfg.image),
+      cfg.cache_mode + ' · ' + mgFieldLabel('max_concurrency') + ' ' + cfg.max_concurrency + ' · ' + cfg.spec + (cfg.draft_tokens ? '×' + cfg.draft_tokens : ''),
+      mgLang() === 'en' ? h.source_en : h.source_zh,
+    ];
+    cells.forEach(c => { const td = document.createElement('td'); td.textContent = c; tr.appendChild(td); });
+    const td = document.createElement('td');
+    if(h.current){
+      const b = document.createElement('span'); b.className = 'mg-badge on'; b.textContent = mgT().mgHistCurrent; td.appendChild(b);
+    } else {
+      const btn = document.createElement('button'); btn.className = 'mg-btn'; btn.type = 'button'; btn.textContent = mgT().mgLoadPreview;
+      btn.addEventListener('click', () => { buildForm(JSON.parse(JSON.stringify(cfg))); renderModels(); refreshPreview(); scheduleDraftSave(cfg); });
+      td.appendChild(btn);
+    }
+    tr.appendChild(td); tb.appendChild(tr);
+  });
+}
+function renderDiff(){
+  const p = MG.preview;
+  const body = $('mgDiffBody');
+  body.innerHTML = '';
+  if(!p) return;
+  if(!(p.diff || []).length){
+    const dv = document.createElement('p'); dv.className = 'muted small'; dv.textContent = mgT().mgNoChanges; body.appendChild(dv);
+  } else {
+    const tbl = document.createElement('table'); tbl.className = 'mg-diff-table';
+    p.diff.forEach(d => {
+      const tr = document.createElement('tr');
+      const k = document.createElement('td'); k.className = 'k'; k.textContent = mgFieldLabel(d.key);
+      const v = document.createElement('td');
+      const o = document.createElement('span'); o.className = 'old'; o.textContent = mgDisplayVal(d.key, d.old_label !== null && d.old_label !== undefined ? d.old : d.old);
+      const n = document.createElement('span'); n.className = 'new'; n.textContent = (d.new === null || d.new === undefined) ? mgT().mgRemoved : mgDisplayVal(d.key, d.new);
+      v.append(o, document.createTextNode(' → '), n);
+      tr.append(k, v); tbl.appendChild(tr);
+    });
+    // 镜像没变也明说，和效果图口径一致。
+    if(!p.diff.some(d => d.key === 'image')){
+      const tr = document.createElement('tr');
+      const k = document.createElement('td'); k.className = 'k'; k.textContent = mgFieldLabel('image');
+      const v = document.createElement('td'); v.textContent = mgT().mgImageUnchanged;
+      tr.append(k, v); tbl.appendChild(tr);
+    }
+    body.appendChild(tbl);
+  }
+  const n = (MG.data.live && MG.data.live.in_flight) || 0;
+  $('mgDiffWarn').textContent = '⚠ ' + mgT().mgDiffWarn.replace('{n}', n);
+  $('mgComposePre').textContent = p.compose_preview || '';
+}
+const _mgModal = $('mgDiffModal');
+$('mgPreviewBtn').addEventListener('click', () => { renderDiff(); _mgModal.classList.add('open'); });
+$('mgDiffClose').addEventListener('click', () => _mgModal.classList.remove('open'));
+$('mgDiffCancel').addEventListener('click', () => _mgModal.classList.remove('open'));
+_mgModal.addEventListener('click', e => { if(e.target === _mgModal) _mgModal.classList.remove('open'); });
+$('mgForm').addEventListener('submit', e => e.preventDefault());
+document.querySelector('#langSel').addEventListener('change', () => {
+  if(MG.data){
+    const cfg = collectForm();
+    renderConsoleAll(cfg);
+  }
+});
+try{
+  if(localStorage.getItem('ninfer-panel-view') === 'manage') switchView('manage');
+}catch(e){}
+</script>
+</body>
+</html>

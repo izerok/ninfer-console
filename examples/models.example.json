@@ -1,0 +1,27 @@
+{
+  "_comment": "Copy to models.json in the panel data volume (or point PANEL_MODELS_FILE at it) and edit. Every field except id/file is optional. 'components' declares what the artifact carries: true, false, or null/omitted for unknown — unknown capabilities produce warnings, never verdicts. 'requires' currently understands only 'nvfp4'. Entries that fail to parse are ignored and reported on the page.",
+  "models": [
+    {
+      "id": "example-model",
+      "name": "Example Model 27B Q4_K_M",
+      "file": "example-model.ninfer",
+      "size_gb": 16.5,
+      "default_spec": "mtp",
+      "components": {"vision": true, "mtp": true, "dflash2": false},
+      "note": "Free-text note shown in the library"
+    },
+    {
+      "id": "example-nvfp4-model",
+      "name": "Example NVFP4 Model",
+      "file": "example-nvfp4-model.ninfer",
+      "requires": ["nvfp4"],
+      "components": {"vision": true, "mtp": true, "dflash2": true}
+    },
+    {
+      "id": "example-text-model",
+      "name": "Example Text-Only Model",
+      "file": "example-text-model.ninfer",
+      "components": {"vision": false, "mtp": true, "dflash2": false}
+    }
+  ]
+}
