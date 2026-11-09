@@ -1,7 +1,7 @@
-# NInfer live panel — monitor only.
+# ninfer-console — monitoring panel + read-only management console.
 # No inference engine is built, downloaded or started here. The image is
-# just Python (stdlib only) serving a static page + a snapshot API that
-# polls an already-running NInfer server.
+# just Python (stdlib only) serving a static page + APIs that poll an
+# already-running NInfer server; the management view applies nothing.
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -18,6 +18,7 @@ RUN groupadd -r ninfer-panel --gid 10001 \
 WORKDIR /app
 COPY app.py /app/app.py
 COPY console_core.py /app/console_core.py
+COPY VERSION /app/VERSION
 COPY web/ /app/web/
 RUN chown -R ninfer-panel:ninfer-panel /app
 
