@@ -40,7 +40,7 @@ State mapping (the panel's own mapping — NInfer exposes no single
 
 Environment:
   NINFER_BASE_URL  default http://host.docker.internal:8080
-                   (set to http://ninfer-unc:8080 if both containers share
+                   (set to http://ninfer:8080 if both containers share
                    a user network, or http://127.0.0.1:8080 with host networking)
   NINFER_API_KEY   optional; sent as Bearer on the read endpoints that
                    require it. /health itself is public in NInfer.
@@ -1190,8 +1190,8 @@ def _poll_once():
         "kv": {"tokens": kv_tokens, "capacity_tokens": kv_cap,
                "used_percent": (kv_tokens / kv_cap * 100.0) if kv_cap else None},
         # Context window: the one thing the first version never showed.
-        # max_context comes from /v1/load capacity (your ninfer-unc runs
-        # with --max-context 262144). KV tokens are the device KV cache
+        # max_context comes from /v1/load capacity. KV tokens are the
+        # device KV cache
         # occupancy — related to context, but not the same as a request's
         # prompt length, so the two are shown separately, never merged
         # into one invented "context used" number.

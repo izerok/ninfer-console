@@ -628,7 +628,7 @@ def build_compose_preview(cfg, models=(), host_models_dir="/path/to/models"):
         "services:",
         "  infer:",
         f"    image: {resolve_image_ref(cfg) or '<image not set>'}",
-        "    container_name: ninfer-unc",
+        "    container_name: ninfer",
         "    restart: unless-stopped",
         "",
         "    command:",

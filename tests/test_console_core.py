@@ -271,7 +271,7 @@ class TestPreviewAndDiff(unittest.TestCase):
         text = cc.build_compose_preview(cfg(), models=self.models)
         self.assertIn("registry.example.com/team/ninfer:1.0", text)
         self.assertIn("full-model.ninfer", text)
-        self.assertIn("container_name: ninfer-unc", text)
+        self.assertIn("container_name: ninfer", text)
         text = cc.build_compose_preview(cc.blank_config(), models=self.models)
         self.assertIn("<image not set>", text)
         self.assertIn("<model file unknown>", text)
