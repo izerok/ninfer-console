@@ -1619,17 +1619,17 @@ function paintRouter(){
     badge.className = 'mg-badge' + (st.status === 'loaded' ? ' on' : st.status === 'sleeping' ? ' info' : '');
     badge.textContent = mgT()['mgState_' + st.status] || mgT().mgState_unknown;
     cell.appendChild(badge);
-    const acts = {loaded: ['sleep', 'unload'], sleeping: ['load', 'unload'],
-                  unloaded: ['load']}[st.status] || [];
-    acts.forEach(a => {
+    // Deliberately one action only: switch to this model. Loading it
+    // makes the engine displace whatever is serving now; there are no
+    // standalone sleep / wake / unload controls, and nothing switches
+    // on its own — every switch is a manual click here.
+    if(st.status === 'sleeping' || st.status === 'unloaded'){
       const b = document.createElement('button');
       b.className = 'mg-btn'; b.type = 'button';
-      b.textContent = a === 'load'
-        ? (st.status === 'sleeping' ? mgT().mgActWake : mgT().mgActLoad)
-        : a === 'sleep' ? mgT().mgActSleep : mgT().mgActUnload;
-      b.addEventListener('click', () => modelAction(st.id, a));
+      b.textContent = mgT().mgActSwitch;
+      b.addEventListener('click', () => modelAction(st.id, 'load'));
       cell.appendChild(b);
-    });
+    }
   });
 }
 
@@ -1641,7 +1641,6 @@ async function refreshRouter(){
 }
 
 async function modelAction(id, action){
-  if(action === 'unload' && !confirm(mgT().mgUnloadConfirm)) return;
   try{
     const res = await fetch('/api/console/model-action', {
       method: 'POST', headers: {'Content-Type': 'application/json'},

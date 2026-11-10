@@ -21,8 +21,9 @@ What it never does:
     start, no Docker access, no Strata anything. If NInfer is down, the
     panel says offline; it does not start anything to fill the gap.
     The single exception: when the engine runs in router mode, the
-    console's model-action endpoint forwards load/sleep/unload to the
-    engine's own /models API — the engine owns its lifecycle.
+    console's model-action endpoint forwards a switch ("load" of the
+    target model) to the engine's own /models API — the engine owns
+    its lifecycle, and the panel exposes no other lifecycle action.
   * the NInfer console (/api/console*) is a management *preview* for
     parameters: model library, the config on record, schema validation,
     compatibility checks and a diff/compose preview. Parameter edits
@@ -558,7 +559,7 @@ def _settings_save(url):
 # via nvidia-smi), never constants baked in for one machine.
 # _console_payload() cross-checks the fields /v1/load reports and
 # flags a mismatch instead of hiding it.
-CONSOLE_VERSION = "0.4.0"
+CONSOLE_VERSION = "0.4.1"
 _DATA_DIR = Path(HISTORY_FILE).parent
 CONSOLE_CURRENT_FILE = os.environ.get(
     "PANEL_CONSOLE_FILE", str(_DATA_DIR / "console_current.json"))
@@ -1548,16 +1549,21 @@ class Handler(BaseHTTPRequestHandler):
                            "application/json")
                 return
             if self.path == "/api/console/model-action":
-                # Model switching via the engine's own router API
-                # (POST /models/load|sleep|unload). The panel forwards
-                # with its configured API key and reports the engine's
-                # answer verbatim. No Docker, no files — the engine
-                # owns its lifecycle.
+                # Model switching via the engine's own router API.
+                # Deliberately the ONLY lifecycle action the panel
+                # exposes: "load" the target model and let the engine
+                # displace the current one (with --model-suspend it is
+                # parked; otherwise unloaded). There are no standalone
+                # sleep / wake / unload controls, and nothing here ever
+                # happens automatically — switching is manual only.
+                # The panel forwards with its configured API key and
+                # reports the engine's answer verbatim. No Docker, no
+                # files — the engine owns its lifecycle.
                 action = data.get("action")
                 model = data.get("model")
-                if action not in ("load", "sleep", "unload"):
+                if action != "load":
                     self._send(400, json.dumps(
-                        {"error": "action must be load, sleep or unload"}),
+                        {"error": "the only action is load (switch)"}),
                         "application/json")
                     return
                 if not isinstance(model, str) or not model or len(model) > 200:
