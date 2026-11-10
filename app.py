@@ -550,7 +550,7 @@ def _settings_save(url):
 # via nvidia-smi), never constants baked in for one machine.
 # _console_payload() cross-checks the fields /v1/load reports and
 # flags a mismatch instead of hiding it.
-CONSOLE_VERSION = "0.2.0"
+CONSOLE_VERSION = "0.3.0"
 _DATA_DIR = Path(HISTORY_FILE).parent
 CONSOLE_CURRENT_FILE = os.environ.get(
     "PANEL_CONSOLE_FILE", str(_DATA_DIR / "console_current.json"))
@@ -1389,12 +1389,14 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-    def _send(self, code, body, ctype):
+    def _send(self, code, body, ctype, headers=None):
         data = body.encode() if isinstance(body, str) else body
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        for key, val in (headers or {}).items():
+            self.send_header(key, val)
         self.end_headers()
         self.wfile.write(data)
 
@@ -1420,7 +1422,8 @@ class Handler(BaseHTTPRequestHandler):
                 {"ninfer_base_url": url, "source": "gui"}), "application/json")
             return
         if self.path in ("/api/console/preview", "/api/console/import",
-                         "/api/console/draft", "/api/console/current"):
+                         "/api/console/draft", "/api/console/current",
+                         "/api/console/import-bundle"):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 data = json.loads(self.rfile.read(length).decode("utf-8"))
@@ -1476,6 +1479,46 @@ class Handler(BaseHTTPRequestHandler):
                 _console_record_current(cfg, "manual")
                 self._send(200, json.dumps({"saved": True, "warnings": warnings}),
                            "application/json")
+                return
+            if self.path == "/api/console/import-bundle":
+                # Import a config bundle exported by another panel (or
+                # an earlier backup of this one). Sections are applied
+                # independently and reported; the operator data files
+                # are rewritten atomically. Panel-local data only —
+                # nothing here touches the engine.
+                models_in, presets_in, current_in, problems, fatal = \
+                    console.parse_bundle(data)
+                if fatal:
+                    self._send(400, json.dumps(
+                        {"error": "not an importable bundle",
+                         "problems": problems}), "application/json")
+                    return
+                applied = {"models": None, "presets": None, "current": False}
+                if models_in is not None:
+                    if _save_json_file(MODELS_FILE, {"models": models_in}):
+                        applied["models"] = len(models_in)
+                    else:
+                        problems.append("models: could not write the data file")
+                if presets_in is not None:
+                    if _save_json_file(PRESETS_FILE, {"presets": presets_in}):
+                        applied["presets"] = len(presets_in)
+                    else:
+                        problems.append("presets: could not write the data file")
+                cur_warnings = []
+                if current_in is not None:
+                    models, _p, _pr, _c, _f = _operator_data()
+                    errors, cur_warnings = console.validate_config(
+                        current_in, models=models, limits=_console_limits())
+                    if errors:
+                        problems.extend(
+                            f"current: not applied ({e['code']}: "
+                            f"{e['message_en']})" for e in errors)
+                    else:
+                        _console_record_current(current_in, "import")
+                        applied["current"] = True
+                self._send(200, json.dumps(
+                    {"applied": applied, "problems": problems,
+                     "warnings": cur_warnings}), "application/json")
                 return
             # /api/console/draft — panel-local draft only; applies nothing.
             cfg = data.get("config")
@@ -1565,6 +1608,27 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, json.dumps({"error": "invalid base_url: expected http(s)://host[:port], no userinfo, no path"}), "application/json")
                 return
             self._send(200, json.dumps(_test_connection(url)), "application/json")
+            return
+        if self.path == "/api/console/export":
+            # Download the operator's own setup (registered models,
+            # presets, saved current record) as one portable bundle.
+            # Panel-local data only; nothing about the engine is in it.
+            entries = []
+            try:
+                if Path(MODELS_FILE).is_file():
+                    entries, _probs = console.load_models_json(
+                        Path(MODELS_FILE).read_text())
+            except Exception:
+                entries = []
+            _m, presets, _p, _c, _f = _operator_data()
+            current = _console_current["config"] if _console_current else None
+            bundle = console.build_bundle(
+                entries, presets, current, console_version=CONSOLE_VERSION,
+                exported_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+            self._send(200, json.dumps(bundle, ensure_ascii=False, indent=2),
+                       "application/json",
+                       {"Content-Disposition":
+                        'attachment; filename="ninfer-console-config.json"'})
             return
         if self.path == "/api/console":
             self._send(200, json.dumps(_console_payload()), "application/json")

@@ -36,6 +36,10 @@ This module is the single source of truth for the management view:
     config, so existing setups are imported, not re-typed.
   * load_presets_json() — operator-defined presets, validated and
     sanitized against the schema on load.
+  * build_bundle() / parse_bundle() — one portable JSON file carrying
+    the operator's registered models, presets and saved current
+    record, for backup and for moving a setup between panels.
+    Discovered models are machine state and never enter a bundle.
 
 Safety boundary: a config that passes validation here is only
 *well-formed and not a known-bad combination*. Nothing in this file —
@@ -192,7 +196,11 @@ def load_models_json(text):
         if fname is not None and not isinstance(fname, str):
             problems.append(f"{where}: file must be a string; skipped")
             continue
-        mid = raw.get("id") or (_stem(fname) if fname else None)
+        raw_id = raw.get("id")
+        if raw_id is not None and not isinstance(raw_id, str):
+            problems.append(f"{where}: id must be a string; skipped")
+            continue
+        mid = raw_id or (_stem(fname) if fname else None)
         if not mid:
             problems.append(f"{where}: needs at least an id or a file; skipped")
             continue
@@ -379,6 +387,64 @@ def load_presets_json(text, models=()):
                         "label": raw.get("label") if isinstance(raw.get("label"), str) else pid,
                         "config": cfg})
     return presets, problems
+
+
+# ------------------------------------------------------------ config bundle
+
+BUNDLE_FORMAT = "ninfer-console-bundle"
+BUNDLE_VERSION = 1
+
+
+def build_bundle(models, presets, current, console_version="",
+                 exported_at=""):
+    """Assemble the portable config bundle: the operator's registered
+    models, presets and saved config on record — nothing else. Models
+    discovered in a directory are that machine's state, not setup, and
+    are never included."""
+    return {"format": BUNDLE_FORMAT, "version": BUNDLE_VERSION,
+            "console_version": console_version, "exported_at": exported_at,
+            "models": models, "presets": presets, "current": current}
+
+
+def parse_bundle(data):
+    """Parse an imported bundle -> (models, presets, current, problems,
+    fatal). A section that is absent (or null) comes back None, meaning
+    "not part of this bundle, leave it untouched". Present sections are
+    cleaned exactly like the operator data files: bad entries are
+    dropped and reported, never fatal. fatal=True means refuse the
+    whole file: not a bundle, or a bundle version this build does not
+    understand."""
+    import json
+    if not isinstance(data, dict):
+        return None, None, None, ["bundle is not a JSON object"], True
+    if data.get("format") != BUNDLE_FORMAT:
+        return None, None, None, \
+            ["missing or wrong format marker (not a ninfer-console bundle)"], True
+    if data.get("version") != BUNDLE_VERSION:
+        return None, None, None, \
+            [f"unsupported bundle version {data.get('version')!r}"], True
+    problems = []
+    models = presets = current = None
+    if data.get("models") is not None:
+        if isinstance(data["models"], list):
+            models, probs = load_models_json(json.dumps({"models": data["models"]}))
+            problems.extend(f"models: {p}" for p in probs)
+        else:
+            problems.append("models: section is not a list; skipped")
+    if data.get("presets") is not None:
+        if isinstance(data["presets"], list):
+            presets, probs = load_presets_json(json.dumps({"presets": data["presets"]}))
+            problems.extend(f"presets: {p}" for p in probs)
+        else:
+            problems.append("presets: section is not a list; skipped")
+    if data.get("current") is not None:
+        if isinstance(data["current"], dict):
+            sub = []
+            current = sanitize_config(data["current"], sub, "current")
+            problems.extend(f"current: {p}" for p in sub)
+        else:
+            problems.append("current: section is not an object; skipped")
+    return models, presets, current, problems, False
 
 
 # -------------------------------------------------------------- validation

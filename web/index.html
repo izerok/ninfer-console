@@ -422,6 +422,18 @@
 
   <section class="st-card">
     <div class="mg-head">
+      <h2 data-i18n="mgDataTitle"></h2>
+      <span class="spacer"></span>
+      <a class="mg-btn" href="/api/console/export" download style="text-decoration:none" data-i18n="mgExport"></a>
+      <button class="mg-btn" type="button" id="mgImportBtn" data-i18n="mgImport"></button>
+      <input type="file" id="mgImportFile" accept=".json,application/json" style="display:none">
+    </div>
+    <div class="muted small" style="margin-top:8px" data-i18n="mgDataNote"></div>
+    <div class="small" id="mgBundleMsg" style="margin-top:8px;display:none"></div>
+  </section>
+
+  <section class="st-card">
+    <div class="mg-head">
       <h2 data-i18n="mgRunning"></h2>
       <span class="mg-badge on" id="mgRunState">—</span>
       <span class="spacer"></span>
@@ -1440,6 +1452,39 @@ function renderProblems(){
   box.style.display = probs.length ? '' : 'none';
   box.textContent = probs.length ? mgT().mgProblemsTitle + ' ' + probs.join('；') : '';
 }
+
+$('mgImportBtn').addEventListener('click', () => $('mgImportFile').click());
+$('mgImportFile').addEventListener('change', async (ev) => {
+  const file = ev.target.files[0];
+  ev.target.value = '';
+  if(!file) return;
+  const msg = $('mgBundleMsg');
+  const show = (text) => { msg.style.display = ''; msg.textContent = text; };
+  let bundle;
+  try{ bundle = JSON.parse(await file.text()); }
+  catch(e){ show(mgT().mgBundleBad + ': ' + mgT().mgBundleReadErr); return; }
+  try{
+    const res = await fetch('/api/console/import-bundle', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(bundle)});
+    const out = await res.json();
+    if(!res.ok){
+      show(mgT().mgBundleBad + ': ' + ((out.problems || []).join('; ') || res.status));
+      return;
+    }
+    const parts = [mgT().mgBundleOk];
+    if(out.applied.models !== null && out.applied.models !== undefined)
+      parts.push(mgT().mgBundleModels + ' ' + out.applied.models);
+    if(out.applied.presets !== null && out.applied.presets !== undefined)
+      parts.push(mgT().mgBundlePresets + ' ' + out.applied.presets);
+    if(out.applied.current) parts.push(mgT().mgBundleCurrent);
+    if((out.problems || []).length)
+      parts.push(mgT().mgBundleProblems + ' ' + out.problems.length + ': ' + out.problems.join('; '));
+    show(parts.join(' · '));
+    MG.data = null;
+    loadConsole();
+  }catch(e){ show(mgT().mgBundleBad + ': ' + e); }
+});
 
 $('mgSaveCurrentBtn').addEventListener('click', async () => {
   const cfg = collectForm();

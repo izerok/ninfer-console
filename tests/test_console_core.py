@@ -285,5 +285,68 @@ class TestPreviewAndDiff(unittest.TestCase):
         self.assertEqual(diff[0]["new_label"], "Text Model")
 
 
+class TestBundle(unittest.TestCase):
+    def _bundle(self):
+        entries, problems = cc.load_models_json(MODELS_JSON)
+        assert not problems
+        presets, problems = cc.load_presets_json(
+            '{"presets": [{"id": "p1", "label": "P1", "config":'
+            ' {"model": "text-model", "spec": "mtp"}}]}')
+        assert not problems
+        current = cc.blank_config()
+        current["model"] = "full-model"
+        return cc.build_bundle(entries, presets, current,
+                               console_version="9.9", exported_at="t")
+
+    def test_round_trip(self):
+        bundle = self._bundle()
+        models, presets, current, problems, fatal = cc.parse_bundle(bundle)
+        self.assertFalse(fatal)
+        self.assertEqual(problems, [])
+        self.assertEqual([m["id"] for m in models],
+                         ["full-model", "text-model", "nvfp4-model",
+                          "mystery-model"])
+        self.assertEqual(models[2]["requires"], ["nvfp4"])
+        self.assertEqual([p["id"] for p in presets], ["p1"])
+        self.assertEqual(current["model"], "full-model")
+
+    def test_missing_sections_are_none(self):
+        models, presets, current, problems, fatal = cc.parse_bundle(
+            {"format": cc.BUNDLE_FORMAT, "version": cc.BUNDLE_VERSION})
+        self.assertFalse(fatal)
+        self.assertIsNone(models)
+        self.assertIsNone(presets)
+        self.assertIsNone(current)
+
+    def test_not_a_bundle_is_fatal(self):
+        for bad in ({"hello": 1}, ["x"], "text",
+                    {"format": cc.BUNDLE_FORMAT, "version": 99}):
+            _m, _p, _c, problems, fatal = cc.parse_bundle(bad)
+            self.assertTrue(fatal, bad)
+            self.assertTrue(problems)
+
+    def test_bad_entries_dropped_not_fatal(self):
+        bundle = self._bundle()
+        bundle["models"] = bundle["models"] + [{"id": 42, "file": "x.ninfer"}]
+        bundle["presets"] = bundle["presets"] + [{"label": "no id"}]
+        bundle["current"] = {"model": "text-model", "nonsense_key": 1}
+        models, presets, current, problems, fatal = cc.parse_bundle(bundle)
+        self.assertFalse(fatal)
+        self.assertEqual(len(models), 4)
+        self.assertEqual(len(presets), 1)
+        self.assertNotIn("nonsense_key", current)
+        self.assertGreaterEqual(len(problems), 2)
+
+    def test_wrong_section_types_skipped(self):
+        bundle = self._bundle()
+        bundle["models"] = {"not": "a list"}
+        bundle["current"] = [1, 2]
+        models, _p, current, problems, fatal = cc.parse_bundle(bundle)
+        self.assertFalse(fatal)
+        self.assertIsNone(models)
+        self.assertIsNone(current)
+        self.assertEqual(len(problems), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

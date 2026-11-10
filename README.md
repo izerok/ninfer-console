@@ -84,8 +84,9 @@ python3 app.py
 - **预设**：你自己的数据文件 `presets.json`（格式见 `examples/presets.example.json`），代码不内置任何预设；另有命令数组导入接口（`POST /api/console/import`），把你现有 compose 里的 serve 命令粘进来即可回填表单。
 - **预览变更**：diff（旧 → 新，镜像不变也明说）+ 中断警告（生效 = 重启、在飞请求会断）+ 将生成的 compose 全文（固定结构、只许 schema 内参数变化），仅供核对，不会写入任何地方。
 - **草稿与历史**：表单改动自动存草稿（数据卷 `console_draft.json`），刷新不丢；每次保存当前记录都会在历史里留一版（不是生效事件），任意一版可「载入预览」回填表单。
+- **导入 / 导出配置**：管理页顶部「配置数据」卡一键导出——模型登记、预设、当前记录打包成一个 JSON 配置包（带格式标记与版本号；模型目录的发现结果是机器状态，不进包）；导入时逐项覆盖这三样并逐项报告，坏条目跳过并说明、格式不对或版本不支持整包拒绝，当前记录还要过一遍兼容校验才落。备份、换机器、给第二台面板同步配置都走这个文件。原有的命令数组导入（`POST /api/console/import`）保留，那是把现有 serve 命令回填成表单，两者用途不同。
 
-接口：`GET /api/console`、`POST /api/console/preview`、`POST /api/console/import`、`POST /api/console/draft`、`POST /api/console/current`。逻辑单测在 `tests/test_console_core.py`（`python3 -m unittest discover -s tests`），夹具全是合成数据。
+接口：`GET /api/console`、`GET /api/console/export`、`POST /api/console/preview`、`POST /api/console/import`、`POST /api/console/import-bundle`、`POST /api/console/draft`、`POST /api/console/current`。逻辑单测在 `tests/test_console_core.py`（`python3 -m unittest discover -s tests`），夹具全是合成数据。
 
 ## 数据来源与口径
 
