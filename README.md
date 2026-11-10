@@ -87,9 +87,10 @@ python3 app.py
 - **导入 / 导出配置**：管理页顶部「配置数据」卡一键导出——模型登记、预设、当前记录打包成一个 JSON 配置包（带格式标记与版本号；模型目录的发现结果是机器状态，不进包）；导入时逐项覆盖这三样并逐项报告，坏条目跳过并说明、格式不对或版本不支持整包拒绝，当前记录还要过一遍兼容校验才落。备份、换机器、给第二台面板同步配置都走这个文件。原有的命令数组导入（`POST /api/console/import`）保留，那是把现有 serve 命令回填成表单，两者用途不同。
 - **模型切换（路由模式）**：引擎以路由模式启动时（`ninfer-serve --models-dir … --models-preset … --model-suspend`），面板轮询 `GET /models` 拿每个模型的实时状态（运行中 / 睡眠中 / 未加载 / 加载中），不在服务的模型行上只有一个「切换」按钮。点击经 `POST /api/console/model-action` 转发到引擎的 `POST /models/load`（带面板配置的 API key），引擎随即加载目标模型并换下当前模型——带 `--model-suspend` 时被换下的睡下驻留（保留状态与会话、只还显存，切回是秒级唤醒），否则被卸载。引擎的回答原样回报。**刻意只有一个动作**：面板不提供独立的睡下 / 卸载 / 唤醒，引擎侧也不设自动睡眠定时——什么都不点，就什么都不会换。这套生命周期完全由引擎拥有，面板不碰 Docker、不重启任何东西。引擎没开路由模式时，模型库上方明说不可用，不假装。路由模式下没有模型在服务时，监控视图显示「路由」状态而不是误报离线。每个模型的参数在路由模式下由引擎的 preset 文件分段管理，改参数仍走那份文件 + 重启引擎一次，不在本页生效范围。
 
-- **引擎预设文件在线编辑（可选开启）**：路由模式下每个模型的参数在引擎的 `presets.ini` 里。部署时设 `PANEL_PRESET_FILE` 并把这一个文件以可写方式单独挂给面板（模型目录本身继续只读），管理页就出现「引擎预设文件」卡：直接改引擎实际读的那份文件。保存前先过 INI 结构校验（语法错误、重复键直接拒，写不进去），上一版自动备份进面板数据卷（`preset-backups/`，留最近 5 份）；分段名对不上任何已登记模型或模型文件只警告不拦截（引擎会忽略它们）。保存后需重启引擎服务才生效——面板不重启任何东西，这一步仍在部署工具里做。
+- **引擎预设文件在线编辑（可选开启）**：路由模式下每个模型的参数在引擎的 `presets.ini` 里。部署时设 `PANEL_PRESET_FILE` 并把这一个文件以可写方式单独挂给面板（模型目录本身继续只读），管理页就出现「引擎预设文件」卡：直接改引擎实际读的那份文件。保存前先过 INI 结构校验（语法错误、重复键直接拒，写不进去），上一版自动备份进面板数据卷（`preset-backups/`，留最近 5 份）；分段名对不上任何已登记模型或模型文件只警告不拦截（引擎会忽略它们）。引擎只在启动时读这份文件，所以保存后要重启引擎服务才生效（下一条）。
+- **一键生效（restarter 侧车，可选开启）**：引擎配置只能在启动时读，改完要生效就必须重启引擎容器。这件事不由面板直接做——面板永远不碰 Docker。部署里可以多放一个极简侧车 `ninfer-console-restarter`（本仓 `restarter/`，单文件、纯标准库）：它持有 docker.sock，全部能力只有一条——按名字重启 `RESTARTER_CONTAINER` 指定的那一个容器，别的路由不存在、别的容器点名也点不到；调用要 Bearer 令牌，只应放在 compose 内网、永不发布端口。面板设 `PANEL_RESTARTER_URL`/`PANEL_RESTARTER_TOKEN` 后，预设文件卡出现「保存并重启生效」：保存 → 经侧车重启引擎 → 等引擎确实回来（观测到停机或运行时长归零）→ 核对引擎目录与文件分段一致才报「已生效」。重启会切断在飞请求、睡下驻留的会话也会丢，这是引擎重启的固有代价，按钮旁有提示。没部署侧车时面板照常工作，只是这一步回到部署工具里手动做。
 
-接口：`GET /api/console`、`GET /api/console/export`、`GET /api/console/router`、`GET /api/console/preset-file`、`POST /api/console/preview`、`POST /api/console/import`、`POST /api/console/import-bundle`、`POST /api/console/draft`、`POST /api/console/current`、`POST /api/console/model-action`、`POST /api/console/preset-file`。逻辑单测在 `tests/test_console_core.py`（`python3 -m unittest discover -s tests`），夹具全是合成数据。
+接口：`GET /api/console`、`GET /api/console/export`、`GET /api/console/router`、`GET /api/console/preset-file`、`GET /api/console/restarter`、`POST /api/console/preview`、`POST /api/console/import`、`POST /api/console/import-bundle`、`POST /api/console/draft`、`POST /api/console/current`、`POST /api/console/model-action`、`POST /api/console/preset-file`、`POST /api/console/restart-engine`。逻辑单测在 `tests/test_console_core.py`（`python3 -m unittest discover -s tests`），夹具全是合成数据。
 
 ## 数据来源与口径
 
@@ -138,6 +139,8 @@ python3 app.py
 | `PANEL_REQUEST_LOG` | 空（关） | NInfer 请求日志在面板容器内的路径（只读挂载，源头是 serve 的 `--request-log-jsonl`）；设了才有真实单请求行 |
 | `PANEL_MODELS_DIR` | 空（关） | 模型目录在面板容器内的路径（只读挂载）；管理视图的模型库从这里发现实际存在的 `*.ninfer` 并实测大小 |
 | `PANEL_PRESET_FILE` | 空（关） | 引擎的路由预设文件（presets.ini）在面板容器内的路径；设了且文件可写，管理视图出现「引擎预设文件」在线编辑卡。这是面板唯一能写的引擎文件，模型目录本身保持只读 |
+| `PANEL_RESTARTER_URL` | 空（关） | restarter 侧车的内网地址（如 `http://restarter:8080`）；设了且侧车能找到目标容器，预设文件卡出现「保存并重启生效」 |
+| `PANEL_RESTARTER_TOKEN` | 空 | 与侧车的 `RESTARTER_TOKEN` 必须一致的 Bearer 令牌 |
 | `PANEL_MODELS_HOST_DIR` | `/path/to/models` | compose 预览里显示的宿主机模型目录；真实路径只从环境传入，不写进仓库 |
 | `PANEL_MODELS_FILE` | 数据卷 `models.json` | 运营者维护的模型登记文件（能力声明在这里）；不存在没关系，写坏了页面会逐条报错、坏条目忽略 |
 | `PANEL_PRESETS_FILE` | 数据卷 `presets.json` | 运营者维护的预设文件；不存在就没有预设，不内置 |

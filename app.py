@@ -64,6 +64,7 @@ import threading
 import time
 import urllib.request
 import urllib.error
+import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -561,7 +562,7 @@ def _settings_save(url):
 # via nvidia-smi), never constants baked in for one machine.
 # _console_payload() cross-checks the fields /v1/load reports and
 # flags a mismatch instead of hiding it.
-CONSOLE_VERSION = "0.5.0"
+CONSOLE_VERSION = "0.6.0"
 _DATA_DIR = Path(HISTORY_FILE).parent
 CONSOLE_CURRENT_FILE = os.environ.get(
     "PANEL_CONSOLE_FILE", str(_DATA_DIR / "console_current.json"))
@@ -584,6 +585,11 @@ PRESETS_FILE = os.environ.get("PANEL_PRESETS_FILE", str(_DATA_DIR / "presets.jso
 # stays read-only. This is the single engine file the panel may write.
 ENGINE_PRESET_FILE = os.environ.get("PANEL_PRESET_FILE", "")
 PRESET_BACKUP_DIR = _DATA_DIR / "preset-backups"
+# The restarter sidecar (separate tiny service whose only capability
+# is restarting the one engine container). The panel talks to it over
+# the internal network; the panel itself never touches Docker.
+RESTARTER_URL = os.environ.get("PANEL_RESTARTER_URL", "").rstrip("/")
+RESTARTER_TOKEN = os.environ.get("PANEL_RESTARTER_TOKEN", "")
 try:
     _HOST_CACHE_MAX_MIB_ENV = int(os.environ.get("PANEL_HOST_CACHE_MAX_MIB", "") or 0) or None
 except ValueError:
@@ -1164,20 +1170,63 @@ def _preset_known_ids():
     return known
 
 
+def _restarter_call(method, path, timeout=10):
+    """One call to the restarter sidecar. Returns (status, obj|None)."""
+    if not RESTARTER_URL:
+        return 0, None
+    conn_cls = (http.client.HTTPSConnection
+                if RESTARTER_URL.startswith("https://")
+                else http.client.HTTPConnection)
+    host = RESTARTER_URL.split("://", 1)[1]
+    conn = conn_cls(host, timeout=timeout)
+    try:
+        headers = {}
+        if RESTARTER_TOKEN:
+            headers["Authorization"] = f"Bearer {RESTARTER_TOKEN}"
+        conn.request(method, path, headers=headers)
+        resp = conn.getresponse()
+        raw = resp.read().decode("utf-8", "replace")
+        try:
+            return resp.status, json.loads(raw)
+        except Exception:
+            return resp.status, None
+    finally:
+        conn.close()
+
+
+def _restarter_state():
+    """Restarter reachability + target container state, for the UI.
+    Not configured is a normal answer, reported as such."""
+    if not RESTARTER_URL:
+        return {"available": False, "reason": "not_configured"}
+    try:
+        status, obj = _restarter_call("GET", "/healthz", timeout=4)
+    except Exception:
+        return {"available": False, "reason": "unreachable"}
+    if status == 200 and obj:
+        return {"available": True, "reason": "", "container": obj.get("container"),
+                "found": bool(obj.get("found")), "state": obj.get("state", "")}
+    return {"available": False, "reason": f"http_{status}"}
+
+
 def _preset_file_state():
     """Current engine preset file for the online editor. Read failures
     are reported as reasons, never raised and never faked."""
     if not ENGINE_PRESET_FILE:
-        return {"available": False, "reason": "not_configured"}
+        return {"available": False, "reason": "not_configured",
+                "restarter": _restarter_state()}
     path = Path(ENGINE_PRESET_FILE)
     if not path.is_file():
-        return {"available": False, "reason": "missing"}
+        return {"available": False, "reason": "missing",
+                "restarter": _restarter_state()}
     try:
         text = path.read_text(encoding="utf-8")
     except Exception:
-        return {"available": False, "reason": "unreadable"}
+        return {"available": False, "reason": "unreadable",
+                "restarter": _restarter_state()}
     return {"available": True, "reason": "", "content": text,
             "writable": os.access(path, os.W_OK),
+            "restarter": _restarter_state(),
             "validation": console.validate_preset_ini(
                 text, _preset_known_ids())}
 
@@ -1578,7 +1627,8 @@ class Handler(BaseHTTPRequestHandler):
                          "/api/console/draft", "/api/console/current",
                          "/api/console/import-bundle",
                          "/api/console/model-action",
-                         "/api/console/preset-file"):
+                         "/api/console/preset-file",
+                         "/api/console/restart-engine"):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 data = json.loads(self.rfile.read(length).decode("utf-8"))
@@ -1635,12 +1685,39 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps({"saved": True, "warnings": warnings}),
                            "application/json")
                 return
+            if self.path == "/api/console/restart-engine":
+                # The one-click apply: ask the restarter sidecar to
+                # restart the engine container so a saved preset file
+                # takes effect. The panel never touches Docker itself;
+                # the sidecar can restart that one container and
+                # nothing else in the world.
+                if not RESTARTER_URL:
+                    self._send(400, json.dumps(
+                        {"ok": False, "error": "restarter not configured"}),
+                        "application/json")
+                    return
+                try:
+                    status, obj = _restarter_call("POST", "/restart",
+                                                  timeout=150)
+                except Exception as exc:
+                    self._send(502, json.dumps(
+                        {"ok": False, "error": f"restarter unreachable: {exc}"}),
+                        "application/json")
+                    return
+                if obj is None:
+                    obj = {"ok": False,
+                           "error": f"restarter returned {status}"}
+                self._send(200 if obj.get("ok") else 502,
+                           json.dumps(obj), "application/json")
+                return
             if self.path == "/api/console/preset-file":
                 # Online edit of the ENGINE's router preset file. The
                 # text is validated before anything is written; the
                 # previous content is backed up into the panel's data
                 # dir first. Takes effect on the engine's next start —
-                # the panel never restarts anything.
+                # the panel itself restarts nothing; the restart is
+                # the sidecar's single capability, invoked from the
+                # preset card's one-click apply.
                 content = data.get("content")
                 if not isinstance(content, str):
                     self._send(400, json.dumps(
@@ -1838,6 +1915,10 @@ class Handler(BaseHTTPRequestHandler):
                        "application/json",
                        {"Content-Disposition":
                         'attachment; filename="ninfer-console-config.json"'})
+            return
+        if self.path == "/api/console/restarter":
+            self._send(200, json.dumps(_restarter_state()),
+                       "application/json")
             return
         if self.path == "/api/console/preset-file":
             self._send(200, json.dumps(_preset_file_state()),

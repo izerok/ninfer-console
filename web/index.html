@@ -464,6 +464,7 @@
     <div class="mg-bundle-row" id="mgPresetFileBtns" hidden>
       <button class="mg-btn" id="mgPresetFileReload" data-i18n="mgPresetReload"></button>
       <button class="mg-btn primary" id="mgPresetFileSave" data-i18n="mgPresetSave"></button>
+      <button class="mg-btn primary" id="mgPresetApply" data-i18n="mgPresetApply" hidden></button>
       <span class="muted small" id="mgPresetFileMsg"></span>
     </div>
   </section>
@@ -1481,6 +1482,7 @@ function renderProblems(){
 $('mgImportBtn').addEventListener('click', () => $('mgImportFile').click());
 $('mgPresetFileReload').addEventListener('click', () => { MG_PRESET_SAVED = null; loadPresetFile(); });
 $('mgPresetFileSave').addEventListener('click', savePresetFile);
+$('mgPresetApply').addEventListener('click', applyPresetFile);
 $('mgPresetFileText').addEventListener('input', () => {
   $('mgPresetFileSave').disabled = $('mgPresetFileText').value === MG_PRESET_SAVED;
 });
@@ -1652,6 +1654,7 @@ function paintRouter(){
 }
 
 let MG_PRESET_SAVED = null;
+let MG_RESTARTER_OK = false;
 async function loadPresetFile(){
   const state = document.getElementById('mgPresetFileState');
   const hint = document.getElementById('mgPresetFileHint');
@@ -1677,21 +1680,27 @@ async function loadPresetFile(){
   if(!r.writable) msg.textContent = mgT().mgPresetNotWritable;
   document.getElementById('mgPresetFileSave').disabled =
     text.value === MG_PRESET_SAVED || !r.writable;
+  const apply = document.getElementById('mgPresetApply');
+  MG_RESTARTER_OK = !!(r.restarter && r.restarter.available && r.restarter.found);
+  apply.hidden = !MG_RESTARTER_OK || !r.writable;
+}
+async function postPresetFile(){
+  const text = document.getElementById('mgPresetFileText');
+  const resp = await fetch('/api/console/preset-file', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({content: text.value})});
+  return await resp.json();
 }
 async function savePresetFile(){
-  const text = document.getElementById('mgPresetFileText');
   const msg = document.getElementById('mgPresetFileMsg');
   try{
-    const resp = await fetch('/api/console/preset-file', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({content: text.value})});
-    const r = await resp.json();
+    const r = await postPresetFile();
     if(!r.ok){
       const errs = (r.validation && r.validation.errors || [r.error || '']).join('; ');
       msg.textContent = mgT().mgPresetInvalid + errs;
       return;
     }
-    MG_PRESET_SAVED = text.value;
+    MG_PRESET_SAVED = document.getElementById('mgPresetFileText').value;
     document.getElementById('mgPresetFileSave').disabled = true;
     let note = mgT().mgPresetSaved + mgT().mgPresetRestartNote;
     if(r.validation && r.validation.unknown_sections && r.validation.unknown_sections.length)
@@ -1699,6 +1708,78 @@ async function savePresetFile(){
     msg.textContent = note;
   }catch(e){
     msg.textContent = mgT().mgPresetInvalid + String(e);
+  }
+}
+async function applyPresetFile(){
+  // One-click apply: save the preset file, restart the engine via the
+  // restarter sidecar, then wait until the engine is provably back
+  // (observed downtime or an uptime reset) and check its catalog
+  // against the file's sections.
+  const msg = document.getElementById('mgPresetFileMsg');
+  const btns = ['mgPresetFileSave', 'mgPresetApply', 'mgPresetFileReload']
+    .map(id => document.getElementById(id));
+  btns.forEach(b => b.disabled = true);
+  try{
+    const text = document.getElementById('mgPresetFileText').value;
+    let expected = null;
+    if(text !== MG_PRESET_SAVED){
+      const r = await postPresetFile();
+      if(!r.ok){
+        const errs = (r.validation && r.validation.errors || [r.error || '']).join('; ');
+        msg.textContent = mgT().mgPresetInvalid + errs;
+        return;
+      }
+      MG_PRESET_SAVED = text;
+      expected = (r.validation.sections || []).map(s => s.name).filter(n => n !== '*');
+    }
+    let uptimeBefore = null;
+    try{
+      const snap = await (await fetch('/api/snapshot')).json();
+      if(snap.ninfer_ok && typeof snap.uptime_seconds === 'number')
+        uptimeBefore = snap.uptime_seconds;
+    }catch(e){}
+    const rr = await (await fetch('/api/console/restart-engine', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: '{}'})).json();
+    if(!rr.ok){
+      msg.textContent = mgT().mgRestartFailed + (rr.error || '');
+      return;
+    }
+    msg.textContent = mgT().mgRestarting;
+    const deadline = Date.now() + 300000;
+    let sawDown = false;
+    while(Date.now() < deadline){
+      await new Promise(res => setTimeout(res, 2000));
+      let snap;
+      try{ snap = await (await fetch('/api/snapshot')).json(); }
+      catch(e){ sawDown = true; continue; }
+      if(!snap.ninfer_ok){ sawDown = true; continue; }
+      const upReset = uptimeBefore !== null &&
+        typeof snap.uptime_seconds === 'number' &&
+        snap.uptime_seconds < uptimeBefore;
+      if(!sawDown && !upReset) continue;
+      // Engine is back on a fresh process. Verify the catalog.
+      if(expected){
+        try{
+          const router = await (await fetch('/api/console/router')).json();
+          const actual = (router.models || []).map(m => m.id).sort();
+          if(JSON.stringify(actual) !== JSON.stringify([...expected].sort())){
+            msg.textContent = mgT().mgAppliedMismatch +
+              ' file: ' + expected.join(', ') + ' / engine: ' + actual.join(', ');
+            return;
+          }
+        }catch(e){ /* catalog check is best-effort; restart proof stands */ }
+      }
+      msg.textContent = mgT().mgApplied;
+      return;
+    }
+    msg.textContent = mgT().mgRestartTimeout;
+  }catch(e){
+    msg.textContent = mgT().mgRestartFailed + String(e);
+  }finally{
+    btns.forEach(b => b.disabled = false);
+    document.getElementById('mgPresetFileSave').disabled =
+      document.getElementById('mgPresetFileText').value === MG_PRESET_SAVED;
   }
 }
 

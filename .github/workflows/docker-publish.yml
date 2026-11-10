@@ -41,3 +41,29 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/ninfer-console:latest
             ghcr.io/${{ github.repository_owner }}/ninfer-console:${{ steps.version.outputs.version }}
+
+  # The restarter sidecar: a separate tiny image whose only capability
+  # is restarting the one engine container (see restarter/). Versioned
+  # in lockstep with the panel (same VERSION file).
+  build-restarter:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+      - name: Read version
+        id: version
+        run: echo "version=v$(cat VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: <redacted>
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./restarter
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/ninfer-console-restarter:latest
+            ghcr.io/${{ github.repository_owner }}/ninfer-console-restarter:${{ steps.version.outputs.version }}

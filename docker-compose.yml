@@ -55,6 +55,14 @@ services:
       # are validated and the previous content is backed up into the
       # panel data volume; changes apply when the engine restarts.
       # PANEL_PRESET_FILE: "/engine/presets.ini"
+      # Optional: one-click apply for preset edits, via the restarter
+      # sidecar (separate tiny service whose only capability is
+      # restarting the one engine container; the panel itself never
+      # touches Docker). Point these at it and add the restarter
+      # service next to this one — a ready-made three-service compose
+      # ships in the project docs. Both tokens must match.
+      # PANEL_RESTARTER_URL: "http://restarter:8080"
+      # PANEL_RESTARTER_TOKEN: ""
       # Optional: real per-request rows from NInfer's request log. Start
       # NInfer with --request-log-jsonl <file>, mount that file read-only
       # (see the volumes note below) and uncomment:
