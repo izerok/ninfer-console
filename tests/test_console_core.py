@@ -408,5 +408,41 @@ class TestPresetIni(unittest.TestCase):
         self.assertFalse(cc.validate_preset_ini(big)["ok"])
 
 
+class TestGeneratePresetIni(unittest.TestCase):
+    def _entries(self):
+        base = {"max_context": 262144, "kv_dtype": "rk4v4-e8",
+                "max_concurrency": 2, "max_pending_requests": 16,
+                "pending_timeout_ms": 600000, "prefill_chunk": 2688,
+                "preserve_thinking": True, "kv_capacity": "auto",
+                "cache_mode": "hybrid", "host_cache_mib": 4096}
+        a = dict(base, model="a", spec="dflash2", draft_tokens=4, vision=True)
+        b = dict(base, model="b", spec="mtp", vision=False)
+        return [{"id": "a", "file": "a.ninfer", "config": a},
+                {"id": "b", "file": "b.ninfer", "config": b},
+                {"id": "ghost", "file": None, "config": None}]
+
+    def test_sections_shared_and_bindings(self):
+        text, inc, skip = cc.generate_preset_ini(self._entries(), startup_id="a")
+        self.assertEqual(inc, ["a", "b"])
+        self.assertEqual(skip, ["ghost"])
+        self.assertIn("[*]\nmax-context = 262144", text)
+        self.assertIn("[a]\nmodel = /models/a.ninfer\nload-on-startup = true", text)
+        self.assertIn("spec = dflash2", text)
+        self.assertIn("[b]\nmodel = /models/b.ninfer\nspec = mtp", text)
+        # identical pairs are hoisted to [*] exactly once, not repeated
+        self.assertEqual(text.count("kv-capacity = auto"), 1)
+        # vision=False must not be rendered anywhere
+        self.assertEqual(text.count("vision"), 1)
+        # secrets / router-owned keys never appear
+        for bad in ("api-key", "host =", "port =", "model-suspend"):
+            self.assertNotIn(bad, text)
+        self.assertTrue(cc.validate_preset_ini(text)["ok"])
+
+    def test_no_models(self):
+        text, inc, skip = cc.generate_preset_ini([])
+        self.assertEqual(inc, [])
+        self.assertTrue(cc.validate_preset_ini(text)["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -50,10 +50,14 @@ services:
       # PANEL_MODELS_DIR: "/models"
       # Optional: online editing of the ENGINE's router preset file.
       # This is the one engine file the panel may ever write, and only
-      # when you opt in here: set the path and mount that single file
-      # writable (the models directory itself stays read-only). Saves
-      # are validated and the previous content is backed up into the
-      # panel data volume; changes apply when the engine restarts.
+      # when you opt in here: set the path and mount the directory
+      # containing it writable (the models directory itself stays
+      # read-only). A directory mount (not a single-file mount) is
+      # what lets the panel generate and create the file when it does
+      # not exist yet, so first deployment needs no manual placement.
+      # Saves are validated and the previous content is backed up
+      # into the panel data volume; changes apply when the engine
+      # restarts (or via the restarter below, if enabled).
       # PANEL_PRESET_FILE: "/engine/presets.ini"
       # Optional: one-click apply for preset edits, via the restarter
       # sidecar (separate tiny service whose only capability is
@@ -72,9 +76,10 @@ services:
       - /proc:/host/proc:ro
       # Optional models mount (pairs with PANEL_MODELS_DIR above):
       # - /path/to/models:/models:ro
-      # Optional engine preset file, writable (pairs with
-      # PANEL_PRESET_FILE above):
-      # - /path/to/models/presets.ini:/engine/presets.ini
+      # Optional engine config directory, writable (pairs with
+      # PANEL_PRESET_FILE above; the panel writes only presets.ini
+      # inside it, and can create that file when missing):
+      # - /path/to/engine-config:/engine
       # Optional request-log mount (pairs with PANEL_REQUEST_LOG above):
       # - /path/to/ninfer-requests.jsonl:/app/request-log.jsonl:ro
       # Persists the history curve (data/history.jsonl) so a page refresh,

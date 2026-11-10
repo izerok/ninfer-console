@@ -462,6 +462,7 @@
     <div class="muted small" id="mgPresetFileHint" style="margin-top:6px"></div>
     <textarea id="mgPresetFileText" class="mg-preset-text" spellcheck="false" hidden></textarea>
     <div class="mg-bundle-row" id="mgPresetFileBtns" hidden>
+      <button class="mg-btn" id="mgPresetGenerate" data-i18n="mgPresetGenerate"></button>
       <button class="mg-btn" id="mgPresetFileReload" data-i18n="mgPresetReload"></button>
       <button class="mg-btn primary" id="mgPresetFileSave" data-i18n="mgPresetSave"></button>
       <button class="mg-btn primary" id="mgPresetApply" data-i18n="mgPresetApply" hidden></button>
@@ -1483,6 +1484,7 @@ $('mgImportBtn').addEventListener('click', () => $('mgImportFile').click());
 $('mgPresetFileReload').addEventListener('click', () => { MG_PRESET_SAVED = null; loadPresetFile(); });
 $('mgPresetFileSave').addEventListener('click', savePresetFile);
 $('mgPresetApply').addEventListener('click', applyPresetFile);
+$('mgPresetGenerate').addEventListener('click', generatePresetFile);
 $('mgPresetFileText').addEventListener('input', () => {
   $('mgPresetFileSave').disabled = $('mgPresetFileText').value === MG_PRESET_SAVED;
 });
@@ -1665,7 +1667,23 @@ async function loadPresetFile(){
   try{ r = await (await fetch('/api/console/preset-file')).json(); }
   catch(e){ hint.textContent = mgT().mgPresetUnreadable; return; }
   if(!r.available){
-    text.hidden = true; btns.hidden = true; state.textContent = '';
+    state.textContent = '';
+    if(r.reason === 'missing' && r.creatable){
+      // First deployment: no file yet, but its directory is writable
+      // — offer generation instead of a dead end. Nothing is written
+      // until Save; MG_PRESET_SAVED = '' marks "no file on disk".
+      hint.textContent = mgT().mgPresetMissing;
+      text.hidden = false; btns.hidden = false;
+      if(MG_PRESET_SAVED === null){ text.value = ''; MG_PRESET_SAVED = ''; }
+      document.getElementById('mgPresetGenerate').hidden = false;
+      document.getElementById('mgPresetFileSave').disabled =
+        !text.value || text.value === MG_PRESET_SAVED;
+      const apply = document.getElementById('mgPresetApply');
+      MG_RESTARTER_OK = !!(r.restarter && r.restarter.available && r.restarter.found);
+      apply.hidden = !MG_RESTARTER_OK;
+      return;
+    }
+    text.hidden = true; btns.hidden = true;
     hint.textContent = r.reason === 'not_configured'
       ? mgT().mgPresetNotConfigured : mgT().mgPresetUnreadable;
     return;
@@ -1710,13 +1728,33 @@ async function savePresetFile(){
     msg.textContent = mgT().mgPresetInvalid + String(e);
   }
 }
+async function generatePresetFile(){
+  const text = document.getElementById('mgPresetFileText');
+  const msg = document.getElementById('mgPresetFileMsg');
+  if(text.value.trim() && !confirm(mgT().mgPresetGenerateConfirm)) return;
+  try{
+    const r = await (await fetch('/api/console/preset-file-generate', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: '{}'})).json();
+    if(!r.ok){ msg.textContent = mgT().mgPresetInvalid + (r.error || ''); return; }
+    text.value = r.content;
+    document.getElementById('mgPresetFileSave').disabled =
+      text.value === MG_PRESET_SAVED;
+    let note = mgT().mgPresetGenerated + (r.models || []).join(', ');
+    if(r.skipped && r.skipped.length)
+      note += ' ' + mgT().mgPresetSkipped + r.skipped.join(', ');
+    msg.textContent = note;
+  }catch(e){
+    msg.textContent = mgT().mgPresetInvalid + String(e);
+  }
+}
 async function applyPresetFile(){
   // One-click apply: save the preset file, restart the engine via the
   // restarter sidecar, then wait until the engine is provably back
   // (observed downtime or an uptime reset) and check its catalog
   // against the file's sections.
   const msg = document.getElementById('mgPresetFileMsg');
-  const btns = ['mgPresetFileSave', 'mgPresetApply', 'mgPresetFileReload']
+  const btns = ['mgPresetFileSave', 'mgPresetApply', 'mgPresetFileReload', 'mgPresetGenerate']
     .map(id => document.getElementById(id));
   btns.forEach(b => b.disabled = true);
   try{

@@ -562,7 +562,7 @@ def _settings_save(url):
 # via nvidia-smi), never constants baked in for one machine.
 # _console_payload() cross-checks the fields /v1/load reports and
 # flags a mismatch instead of hiding it.
-CONSOLE_VERSION = "0.6.0"
+CONSOLE_VERSION = "0.7.0"
 _DATA_DIR = Path(HISTORY_FILE).parent
 CONSOLE_CURRENT_FILE = os.environ.get(
     "PANEL_CONSOLE_FILE", str(_DATA_DIR / "console_current.json"))
@@ -1217,7 +1217,10 @@ def _preset_file_state():
                 "restarter": _restarter_state()}
     path = Path(ENGINE_PRESET_FILE)
     if not path.is_file():
+        parent = path.parent
         return {"available": False, "reason": "missing",
+                "creatable": bool(parent.is_dir()
+                                  and os.access(parent, os.W_OK)),
                 "restarter": _restarter_state()}
     try:
         text = path.read_text(encoding="utf-8")
@@ -1240,24 +1243,29 @@ def _preset_file_save(text):
     if not ENGINE_PRESET_FILE:
         return 400, {"ok": False, "error": "not_configured"}
     path = Path(ENGINE_PRESET_FILE)
-    if not path.is_file():
-        return 400, {"ok": False, "error": "missing"}
-    if not os.access(path, os.W_OK):
+    creating = not path.is_file()
+    if creating:
+        # First deployment: the file may be created from the web when
+        # its directory is mounted writable. Nothing to back up yet.
+        if not (path.parent.is_dir() and os.access(path.parent, os.W_OK)):
+            return 400, {"ok": False, "error": "missing"}
+    elif not os.access(path, os.W_OK):
         return 403, {"ok": False, "error": "not_writable"}
     validation = console.validate_preset_ini(text, _preset_known_ids())
     if not validation["ok"]:
         return 400, {"ok": False, "validation": validation}
     backup_name = None
-    try:
-        PRESET_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        backup_name = "presets-%s.ini" % time.strftime("%Y%m%d-%H%M%S")
-        (PRESET_BACKUP_DIR / backup_name).write_text(
-            path.read_text(encoding="utf-8"), encoding="utf-8")
-        backups = sorted(PRESET_BACKUP_DIR.glob("presets-*.ini"))
-        for old in backups[:-5]:
-            old.unlink()
-    except Exception as exc:
-        return 500, {"ok": False, "error": f"backup failed: {exc}"}
+    if not creating:
+        try:
+            PRESET_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+            backup_name = "presets-%s.ini" % time.strftime("%Y%m%d-%H%M%S")
+            (PRESET_BACKUP_DIR / backup_name).write_text(
+                path.read_text(encoding="utf-8"), encoding="utf-8")
+            backups = sorted(PRESET_BACKUP_DIR.glob("presets-*.ini"))
+            for old in backups[:-5]:
+                old.unlink()
+        except Exception as exc:
+            return 500, {"ok": False, "error": f"backup failed: {exc}"}
     try:
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(text)
@@ -1267,7 +1275,38 @@ def _preset_file_save(text):
         return 500, {"ok": False, "error": f"write failed: {exc}",
                      "backup": backup_name}
     return 200, {"ok": True, "validation": validation,
-                 "backup": backup_name, "restart_required": True}
+                 "backup": backup_name, "created": creating,
+                 "restart_required": True}
+
+
+def _preset_generate():
+    """Draft presets.ini from the console's own data: registered and
+    discovered models, their files, and the per-model preset configs.
+    The current record's model becomes the startup model."""
+    models, presets, _probs, _cfgd, _found = _operator_data()
+    cfg_by_model = {}
+    for p in presets:
+        cfg = p.get("config") or {}
+        if cfg.get("model"):
+            cfg_by_model.setdefault(cfg["model"], cfg)
+    startup_id = None
+    if _console_current and _console_current.get("config"):
+        cur = _console_current["config"]
+        startup_id = cur.get("model")
+        if startup_id and startup_id not in cfg_by_model:
+            cfg_by_model[startup_id] = cur
+    entries = [{"id": m["id"], "file": m.get("file"),
+                "config": cfg_by_model.get(m["id"])} for m in models]
+    if startup_id is None:
+        for e in entries:
+            if e["config"]:
+                startup_id = e["id"]
+                break
+    text, included, skipped = console.generate_preset_ini(
+        entries, startup_id=startup_id,
+        stamp=time.strftime("%Y-%m-%d %H:%M"))
+    return {"ok": True, "content": text, "models": included,
+            "skipped": skipped}
 
 
 def _router_refresh():
@@ -1628,6 +1667,7 @@ class Handler(BaseHTTPRequestHandler):
                          "/api/console/import-bundle",
                          "/api/console/model-action",
                          "/api/console/preset-file",
+                         "/api/console/preset-file-generate",
                          "/api/console/restart-engine"):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -1683,6 +1723,13 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 _console_record_current(cfg, "manual")
                 self._send(200, json.dumps({"saved": True, "warnings": warnings}),
+                           "application/json")
+                return
+            if self.path == "/api/console/preset-file-generate":
+                # Draft only: builds presets.ini text from the console's
+                # registered models and presets. Nothing is written —
+                # the editor reviews it and Save does the writing.
+                self._send(200, json.dumps(_preset_generate()),
                            "application/json")
                 return
             if self.path == "/api/console/restart-engine":
