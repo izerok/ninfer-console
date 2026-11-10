@@ -348,5 +348,35 @@ class TestBundle(unittest.TestCase):
         self.assertEqual(len(problems), 2)
 
 
+class TestRouterNormalize(unittest.TestCase):
+    def test_llama_style_data_with_status_objects(self):
+        payload = {"data": [
+            {"id": "a", "status": {"value": "loaded"}},
+            {"id": "b", "status": {"value": "Sleeping"}},
+            {"model": "c", "status": "unloaded"},
+            {"id": "d"},
+            {"status": "loaded"},
+            "junk",
+        ]}
+        self.assertEqual(cc.normalize_router_models(payload), [
+            {"id": "a", "status": "loaded"},
+            {"id": "b", "status": "sleeping"},
+            {"id": "c", "status": "unloaded"},
+            {"id": "d", "status": "unknown"},
+        ])
+
+    def test_bare_list_and_models_key(self):
+        self.assertEqual(
+            cc.normalize_router_models([{"id": "x", "state": "loading"}]),
+            [{"id": "x", "status": "loading"}])
+        self.assertEqual(
+            cc.normalize_router_models({"models": [{"id": "y", "status": "loaded"}]}),
+            [{"id": "y", "status": "loaded"}])
+
+    def test_garbage_payloads(self):
+        for bad in (None, 42, "text", {"data": {"not": "a list"}}):
+            self.assertEqual(cc.normalize_router_models(bad), [])
+
+
 if __name__ == "__main__":
     unittest.main()

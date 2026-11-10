@@ -130,6 +130,8 @@
   .mg-badge.warn{background:var(--st-warn-tint);color:var(--st-warn-text);border-color:transparent}
   .mg-badge.danger{background:var(--st-danger-tint);color:var(--st-danger-text);border-color:transparent}
   .mg-btn{background:var(--st-surface-2);color:var(--st-ink);border:1px solid var(--st-line);border-radius:999px;padding:8px 16px;font-size:13px;cursor:pointer}
+  .mg-router-cell{display:inline-flex;gap:6px;align-items:center}
+  .mg-router-cell .mg-btn{padding:5px 12px;font-size:12px}
   .mg-btn:hover{border-color:var(--st-ink-muted)}
   .mg-btn.primary{background:var(--st-accent);border-color:transparent;color:#06281c;font-weight:700}
   .mg-btn:disabled{opacity:.45;cursor:default}
@@ -449,7 +451,9 @@
 
   <section class="st-card">
     <div class="mg-head"><h2 data-i18n="mgModels"></h2><span class="muted small" id="mgModelsNote"></span></div>
+    <div class="muted small" id="mgRouterNote" style="margin-top:6px"></div>
     <div id="mgModelList" style="margin-top:6px"></div>
+    <div id="mgRouterExtra"></div>
   </section>
 
   <section class="st-card">
@@ -1406,7 +1410,8 @@ seedSparks().finally(() => { tick(); fetchEvents(); fetchReqHistory(); restartPo
 // 数据全部来自 /api/console*；本段代码不调用任何会改变 NInfer 或
 // Docker 状态的接口。表单与后端的唯一事实源都是 console_core 的
 // PARAM_SCHEMA：字段、顺序、范围不在前端另抄一份。
-const MG = {data: null, preview: null, draftTimer: null};
+const MG = {data: null, preview: null, draftTimer: null, router: null};
+let mgRouterTimer = null;
 const mgT = () => T();
 const mgLang = () => (LANG === 'en' ? 'en' : 'zh');
 const mgNote = obj => obj.note || '';
@@ -1428,6 +1433,11 @@ function switchView(name){
   $('viewManageBtn').dataset.active = manage ? 'true' : 'false';
   try{ localStorage.setItem('ninfer-panel-view', name); }catch(e){}
   if(manage && !MG.data) loadConsole();
+  if(mgRouterTimer){ clearInterval(mgRouterTimer); mgRouterTimer = null; }
+  if(manage){
+    refreshRouter();
+    mgRouterTimer = setInterval(refreshRouter, 5000);
+  }
 }
 $('viewMonitorBtn').addEventListener('click', () => switchView('monitor'));
 $('viewManageBtn').addEventListener('click', () => switchView('manage'));
@@ -1435,6 +1445,7 @@ $('viewManageBtn').addEventListener('click', () => switchView('manage'));
 async function loadConsole(){
   try{
     MG.data = await (await fetch('/api/console')).json();
+    MG.router = MG.data.router || null;
     const start = MG.data.draft || MG.data.current.config;
     if(MG.data.draft) $('mgDraftNote').style.display = '';
     renderConsoleAll(JSON.parse(JSON.stringify(start)));
@@ -1443,6 +1454,7 @@ async function loadConsole(){
 
 function renderConsoleAll(cfg){
   renderProblems(); renderRunCard(); renderModels(); renderPresets(); buildForm(cfg); renderHistory();
+  paintRouter();
   refreshPreview();
 }
 
@@ -1546,6 +1558,12 @@ function renderModels(){
       }
     });
     const sp = document.createElement('span'); sp.className = 'spacer'; row.appendChild(sp);
+    if(m.id){
+      const rc = document.createElement('span');
+      rc.className = 'mg-router-cell'; rc.dataset.routerFor = m.id;
+      if(m.file) rc.dataset.routerStem = m.file.replace(/\.ninfer$/, '');
+      row.appendChild(rc);
+    }
     if(m.is_current){
       const b = document.createElement('span'); b.className = 'mg-badge on'; b.textContent = mgT().mgCurrentBadge; row.appendChild(b);
     } else if(m.present === false){
@@ -1561,6 +1579,87 @@ function renderModels(){
     }
     wrap.appendChild(row);
   });
+}
+
+function routerStateFor(id, stem){
+  const models = (MG.router && MG.router.models) || [];
+  return models.find(x => x.id === id) || (stem ? models.find(x => x.id === stem) : null) || null;
+}
+
+function paintRouter(){
+  const note = $('mgRouterNote');
+  if(!MG.router) note.textContent = '';
+  else if(!MG.router.available)
+    note.textContent = MG.router.reason === 'not_router' ? mgT().mgRouterOff : mgT().mgRouterUnknown;
+  else note.textContent = mgT().mgRouterOn;
+  // Engine catalog entries with no console row get a minimal row of
+  // their own, so every switchable model is reachable.
+  const extra = $('mgRouterExtra');
+  extra.innerHTML = '';
+  if(MG.router && MG.router.available){
+    const known = new Set();
+    document.querySelectorAll('[data-router-for]').forEach(c => {
+      known.add(c.dataset.routerFor);
+      if(c.dataset.routerStem) known.add(c.dataset.routerStem);
+    });
+    MG.router.models.filter(x => !known.has(x.id)).forEach(x => {
+      const row = document.createElement('div'); row.className = 'mg-model-row';
+      const nm = document.createElement('div'); nm.className = 'mg-model-name'; nm.textContent = x.id;
+      const cell = document.createElement('span');
+      cell.className = 'mg-router-cell'; cell.dataset.routerFor = x.id;
+      row.append(nm, cell); extra.appendChild(row);
+    });
+  }
+  document.querySelectorAll('[data-router-for]').forEach(cell => {
+    cell.innerHTML = '';
+    if(!MG.router || !MG.router.available) return;
+    const st = routerStateFor(cell.dataset.routerFor, cell.dataset.routerStem);
+    if(!st) return;
+    const badge = document.createElement('span');
+    badge.className = 'mg-badge' + (st.status === 'loaded' ? ' on' : st.status === 'sleeping' ? ' info' : '');
+    badge.textContent = mgT()['mgState_' + st.status] || mgT().mgState_unknown;
+    cell.appendChild(badge);
+    const acts = {loaded: ['sleep', 'unload'], sleeping: ['load', 'unload'],
+                  unloaded: ['load']}[st.status] || [];
+    acts.forEach(a => {
+      const b = document.createElement('button');
+      b.className = 'mg-btn'; b.type = 'button';
+      b.textContent = a === 'load'
+        ? (st.status === 'sleeping' ? mgT().mgActWake : mgT().mgActLoad)
+        : a === 'sleep' ? mgT().mgActSleep : mgT().mgActUnload;
+      b.addEventListener('click', () => modelAction(st.id, a));
+      cell.appendChild(b);
+    });
+  });
+}
+
+async function refreshRouter(){
+  try{
+    MG.router = await (await fetch('/api/console/router')).json();
+    if(MG.data) paintRouter();
+  }catch(e){ /* 面板本地接口抖动不打扰用户，下个周期再刷 */ }
+}
+
+async function modelAction(id, action){
+  if(action === 'unload' && !confirm(mgT().mgUnloadConfirm)) return;
+  try{
+    const res = await fetch('/api/console/model-action', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model: id, action})});
+    const out = await res.json();
+    if(!res.ok || !out.ok){
+      const why = out.error || (out.engine && out.engine.error) ||
+                  ('HTTP ' + (out.engine_status || res.status));
+      alert(mgT().mgActFailed + ': ' + why);
+    }
+  }catch(e){ alert(mgT().mgActFailed + ': ' + e); }
+  let n = 0;
+  const iv = setInterval(async () => {
+    n++;
+    await refreshRouter();
+    const st = MG.router && MG.router.models.find(x => x.id === id);
+    if((st && st.status !== 'loading') || n > 40) clearInterval(iv);
+  }, 1500);
 }
 
 function renderPresets(){

@@ -17,13 +17,16 @@ What it does, and nothing else:
     which would be the wrong machine's numbers.
 
 What it never does:
-  * no POST to NInfer (no load/unload/chat/generation), no model download,
-    no engine start, no Strata anything. If NInfer is down, the panel
-    says offline; it does not start anything to fill the gap.
-  * the NInfer console (/api/console*) is a read-only management
-    *preview*: model library, the config on record, schema validation,
-    compatibility checks and a diff/compose preview. It applies
-    nothing — no Docker access, no compose writes, no NInfer calls.
+  * no chat/generation POSTs to NInfer, no model download, no engine
+    start, no Docker access, no Strata anything. If NInfer is down, the
+    panel says offline; it does not start anything to fill the gap.
+    The single exception: when the engine runs in router mode, the
+    console's model-action endpoint forwards load/sleep/unload to the
+    engine's own /models API — the engine owns its lifecycle.
+  * the NInfer console (/api/console*) is a management *preview* for
+    parameters: model library, the config on record, schema validation,
+    compatibility checks and a diff/compose preview. Parameter edits
+    apply nothing — no Docker access, no compose writes.
     The only files it writes are the panel's own records in the data
     volume (the config on record, an unsaved-changes draft, and the
     record history). No deployment's configuration is built into the
@@ -72,6 +75,10 @@ WEB_DIR = Path(__file__).resolve().parent / "web"
 
 _lock = threading.Lock()
 _snapshot = {"ninfer_ok": False, "state": "offline", "error": "not polled yet"}
+# Engine router state (GET /models), refreshed by the poller. available
+# is True only when the engine answers as a router; reason says why not
+# ("not_router" on 404, "unreachable", "http_<code>", "bad_payload").
+_router = {"available": False, "reason": "not_polled", "models": [], "at": 0.0}
 _prev = None  # (timestamp, decode_tokens, prefill_tokens)
 _prev_draft = None  # (timestamp, draft_tokens_total, draft_accepted_tokens_total)
 # Rolling 15-minute window: counter samples kept for 900 s so the panel
@@ -534,7 +541,8 @@ def _settings_save(url):
     _history.clear()
 
 
-# NInfer console (ninfer-console, read-only management preview).
+# NInfer console (ninfer-console): management preview for parameters,
+# plus model switching through the engine's own router API.
 #
 # Nothing here is seeded with any deployment's configuration. The
 # config on record is, in priority order:
@@ -550,7 +558,7 @@ def _settings_save(url):
 # via nvidia-smi), never constants baked in for one machine.
 # _console_payload() cross-checks the fields /v1/load reports and
 # flags a mismatch instead of hiding it.
-CONSOLE_VERSION = "0.3.0"
+CONSOLE_VERSION = "0.4.0"
 _DATA_DIR = Path(HISTORY_FILE).parent
 CONSOLE_CURRENT_FILE = os.environ.get(
     "PANEL_CONSOLE_FILE", str(_DATA_DIR / "console_current.json"))
@@ -813,7 +821,7 @@ def _console_payload():
                 model_match = False
     return {
         "console_version": CONSOLE_VERSION,
-        "readonly": True,
+        "readonly": False,
         "schema": console.PARAM_SCHEMA,
         "models": out_models,
         "presets": presets,
@@ -822,6 +830,7 @@ def _console_payload():
                     "saved_at": record["saved_at"]},
         "draft": _console_draft,
         "models_dir": {"configured": configured, "found": len(found)},
+        "router": dict(_router),
         "registry_problems": problems,
         "limits": _console_limits(),
         "live": {"ninfer_ok": bool(snap.get("ninfer_ok")),
@@ -914,6 +923,24 @@ def _get(path, timeout=3):
     req.add_header("Accept", "application/json, text/plain")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.status, resp.read().decode("utf-8", "replace")
+
+
+def _post_json(path, obj, timeout=30):
+    """POST JSON to the engine with the panel's API key. Returns
+    (status, body_text); HTTP error statuses are returned, not raised,
+    so callers can show the engine's own answer."""
+    req = urllib.request.Request(
+        _current_base() + path,
+        data=json.dumps(obj).encode(),
+        headers={"Content-Type": "application/json",
+                 "Accept": "application/json, text/plain"})
+    if API_KEY:
+        req.add_header("Authorization", "Bearer " + API_KEY)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", "replace")
 
 
 def _test_connection(base):
@@ -1107,6 +1134,32 @@ def _host_mem():
             "used_percent": (used / total * 100.0) if total else None}
 
 
+def _router_refresh():
+    """Refresh the engine router state from GET /models. A 404 means
+    the engine is not running as a router — a normal, reportable state,
+    not an error. Runs inside the poller; never raises."""
+    state = {"available": False, "reason": "unreachable", "models": [],
+             "at": time.time()}
+    try:
+        status, body = _get("/models", timeout=3)
+        if status == 200:
+            try:
+                models = console.normalize_router_models(json.loads(body))
+                state = {"available": True, "reason": "", "models": models,
+                         "at": time.time()}
+            except Exception:
+                state["reason"] = "bad_payload"
+        else:
+            state["reason"] = f"http_{status}"
+    except urllib.error.HTTPError as exc:
+        state["reason"] = "not_router" if exc.code == 404 else f"http_{exc.code}"
+    except Exception:
+        state["reason"] = "unreachable"
+    with _lock:
+        _router.clear()
+        _router.update(state)
+
+
 def _poll_once():
     global _prev, _last_ok, _prev_draft
     now = time.time()
@@ -1124,10 +1177,23 @@ def _poll_once():
         snap["error"] = f"cannot reach {_current_base()}/health: {exc}"
         return snap
 
+    _router_refresh()
+    snap["router"] = dict(_router)
+
     try:
         _, load_body = _get("/v1/load", timeout=3)
         load = json.loads(load_body)
     except Exception as exc:
+        if _router["available"]:
+            # Router mode: /v1/load is per-model and legitimately
+            # unavailable while the serving model is asleep or none is
+            # loaded. The engine is up; say exactly that instead of
+            # reporting it offline.
+            snap["ninfer_ok"] = True
+            snap["state"] = "router"
+            snap["last_ok"] = now
+            _last_ok = now
+            return snap
         snap["error"] = f"/health ok but /v1/load failed: {exc}"
         return snap
 
@@ -1423,7 +1489,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path in ("/api/console/preview", "/api/console/import",
                          "/api/console/draft", "/api/console/current",
-                         "/api/console/import-bundle"):
+                         "/api/console/import-bundle",
+                         "/api/console/model-action"):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 data = json.loads(self.rfile.read(length).decode("utf-8"))
@@ -1479,6 +1546,40 @@ class Handler(BaseHTTPRequestHandler):
                 _console_record_current(cfg, "manual")
                 self._send(200, json.dumps({"saved": True, "warnings": warnings}),
                            "application/json")
+                return
+            if self.path == "/api/console/model-action":
+                # Model switching via the engine's own router API
+                # (POST /models/load|sleep|unload). The panel forwards
+                # with its configured API key and reports the engine's
+                # answer verbatim. No Docker, no files — the engine
+                # owns its lifecycle.
+                action = data.get("action")
+                model = data.get("model")
+                if action not in ("load", "sleep", "unload"):
+                    self._send(400, json.dumps(
+                        {"error": "action must be load, sleep or unload"}),
+                        "application/json")
+                    return
+                if not isinstance(model, str) or not model or len(model) > 200:
+                    self._send(400, json.dumps(
+                        {"error": "model must be a non-empty id string"}),
+                        "application/json")
+                    return
+                try:
+                    status, body = _post_json(f"/models/{action}",
+                                              {"model": model}, timeout=180)
+                except Exception as exc:
+                    self._send(502, json.dumps(
+                        {"error": f"engine unreachable: {exc}"}),
+                        "application/json")
+                    return
+                try:
+                    engine = json.loads(body)
+                except Exception:
+                    engine = body[:500]
+                self._send(200, json.dumps(
+                    {"ok": 200 <= status < 300, "engine_status": status,
+                     "engine": engine}), "application/json")
                 return
             if self.path == "/api/console/import-bundle":
                 # Import a config bundle exported by another panel (or
@@ -1629,6 +1730,11 @@ class Handler(BaseHTTPRequestHandler):
                        "application/json",
                        {"Content-Disposition":
                         'attachment; filename="ninfer-console-config.json"'})
+            return
+        if self.path == "/api/console/router":
+            with _lock:
+                state = dict(_router)
+            self._send(200, json.dumps(state), "application/json")
             return
         if self.path == "/api/console":
             self._send(200, json.dumps(_console_payload()), "application/json")

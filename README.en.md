@@ -5,7 +5,7 @@
 A web console for an already-running NInfer server, with two faces on one page:
 
 - **Monitor view**: a read-only live panel — engine state, speeds, VRAM, requests, and history curves.
-- **Manage view**: a read-only management preview — pick a model, edit parameters, validate combinations, inspect the diff and the compose that would be generated. **Nothing is applied**: no Docker access, no file writes, no requests to NInfer.
+- **Manage view**: pick a model, edit parameters, validate combinations, inspect the diff and the compose that would be generated. Parameter edits are **never applied**: no Docker access, no writes to the engine's files. The one real action is **model switching**: when the engine runs in router mode, the model library loads / sleeps / unloads models through the engine's own `/models` API, executed by the engine itself.
 
 Both views follow the same rule: **report only what is measured; when something cannot be measured, say "unavailable" instead of inventing a number**. And the code contains **no deployment's configuration** — the model library, presets, the config on record, and the limits all come from your running environment (the models directory, data files you maintain, and values measured from the engine and the host).
 
@@ -71,9 +71,9 @@ The top-right Settings dialog edits the NInfer address; saving takes effect imme
 
 Top-right buttons switch dark / light and 中文 / English, stored in browser `localStorage`; before a choice, the theme follows the system and the language follows the browser. All UI strings come from one dictionary in `web/i18n.js`; `web/index.html` contains none.
 
-## Manage view (read-only preview)
+## Manage view
 
-The header switches between Monitor and Manage. Pick a model, edit parameters, validate, and inspect the diff — but nothing is applied. No Docker access, no compose writes, no requests to NInfer; the "Apply & restart" button is disabled (the apply loop — socket-proxy + login + health gate + automatic rollback — is future work).
+The header switches between Monitor and Manage. Pick a model, edit parameters, validate, and inspect the diff — parameter edits are never applied: no Docker access, no compose writes, and the "Apply & restart" button is disabled. **Model switching is a real action** (next section), through the engine's own router API.
 
 **No deployment's configuration is built into the code.** The model library, presets, the config on record and the limits all come from the running environment:
 
@@ -86,11 +86,13 @@ The header switches between Monitor and Manage. Pick a model, edit parameters, v
 - **Draft and history**: form edits auto-save to a draft in the data volume (`console_draft.json`) and survive refreshes; every saved current record also lands in the history (records, not apply events), and any version can be loaded back into the form as a preview.
 - **Import / export config**: the "Config data" card at the top of the Manage view exports one JSON bundle — registered models, presets, and the saved current record, with a format marker and a bundle version (models-directory discoveries are machine state and stay out). Import overwrites those three section by section and reports each: bad entries are skipped with reasons, a wrong format or unsupported version refuses the whole file, and a bundled current record must pass validation before it is recorded. Use it for backups, moving to a new host, or syncing a second panel. The older command-array import (`POST /api/console/import`) remains — that one turns an existing serve command back into form values, a different job.
 
-Endpoints: `GET /api/console`, `GET /api/console/export`, `POST /api/console/preview`, `POST /api/console/import`, `POST /api/console/import-bundle`, `POST /api/console/draft`, `POST /api/console/current`. Logic tests live in `tests/test_console_core.py` (`python3 -m unittest discover -s tests`) and use synthetic fixtures only.
+- **Model switching (router mode)**: when the engine is started as a router (`ninfer-serve --models-dir … --models-preset … --model-suspend`), the panel polls `GET /models` for every model's live state (loaded / sleeping / unloaded / loading) and each library row carries the matching buttons: Load, Wake, Sleep, Unload (unload asks first). Actions go through `POST /api/console/model-action`, which forwards to the engine's `POST /models/load|sleep|unload` with the panel's configured API key and reports the engine's answer verbatim — if a model cannot sleep mid-generation, the engine's 409 `model_busy` is what the page shows. A sleeping model keeps its engine state and conversations and gives back only GPU memory, so waking takes seconds. The lifecycle belongs entirely to the engine: the panel touches no Docker and restarts nothing. When the engine is not in router mode, the library says so plainly instead of pretending. In router mode with no model serving, the Monitor view shows a "router" state rather than a false offline. Per-model parameters in router mode live in the engine's preset file sections; changing them still means editing that file and restarting the engine once — outside what this page applies.
+
+Endpoints: `GET /api/console`, `GET /api/console/export`, `GET /api/console/router`, `POST /api/console/preview`, `POST /api/console/import`, `POST /api/console/import-bundle`, `POST /api/console/draft`, `POST /api/console/current`, `POST /api/console/model-action`. Logic tests live in `tests/test_console_core.py` (`python3 -m unittest discover -s tests`) and use synthetic fixtures only.
 
 ## Data sources and definitions
 
-The Monitor view only ever issues GETs to NInfer:
+The Monitor view only ever issues GETs to NInfer (the Manage view's model switching is the single exception, above):
 
 | Endpoint | Used for |
 | --- | --- |

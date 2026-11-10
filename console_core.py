@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""NInfer console (ninfer-console) — read-only management core.
+"""NInfer console (ninfer-console) — management core.
 
-Pure logic only: no I/O, no HTTP, no Docker, nothing is ever applied.
+Pure logic only: no I/O, no HTTP, no Docker. Parameter edits are never
+applied from here; the one live action (router model switching) is a
+thin HTTP forward in app.py, not logic in this module.
 This module is the single source of truth for the management view:
 
   * PARAM_SCHEMA — every serve parameter the form may touch, with its
@@ -445,6 +447,36 @@ def parse_bundle(data):
         else:
             problems.append("current: section is not an object; skipped")
     return models, presets, current, problems, False
+
+
+def normalize_router_models(payload):
+    """Normalize an engine router's GET /models payload into
+    [{"id": str, "status": str}]. Tolerant of the shapes llama.cpp-family
+    routers emit: a bare list or {"data"|"models": [...]}, the id under
+    "id" or "model", the status as a string or {"value": ...}. Entries
+    without a usable id are skipped — never invented."""
+    if isinstance(payload, dict):
+        raw = payload.get("data") or payload.get("models") or []
+    elif isinstance(payload, list):
+        raw = payload
+    else:
+        raw = []
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        mid = entry.get("id") or entry.get("model")
+        if not isinstance(mid, str) or not mid:
+            continue
+        status = entry.get("status", entry.get("state"))
+        if isinstance(status, dict):
+            status = status.get("value") or status.get("status")
+        if not isinstance(status, str) or not status:
+            status = "unknown"
+        out.append({"id": mid, "status": status.lower()})
+    return out
 
 
 # -------------------------------------------------------------- validation

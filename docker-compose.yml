@@ -1,7 +1,9 @@
-# ninfer-console — a monitoring panel plus a read-only management
-# console for NInfer. It does not deploy, download or start any
-# inference framework. It only polls a NInfer server that is already
-# running somewhere else, and the management view applies nothing.
+# ninfer-console — a monitoring panel plus a management console for
+# NInfer. It does not deploy, download or start any inference
+# framework. It polls a NInfer server that is already running
+# somewhere else; parameter edits in the management view apply
+# nothing, and the one live action — switching models — goes through
+# the engine's own router API when the engine runs in router mode.
 #
 # Default wiring (most common case: NInfer published on the host at :8080):
 #   panel -> host.docker.internal:8080 -> your NInfer container

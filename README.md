@@ -5,7 +5,7 @@
 给已经在跑的 NInfer 用的 Web 控制台，一个页面两副面孔：
 
 - **监控视图**：只读实时面板，看引擎状态、速度、显存、请求与历史曲线。
-- **管理视图**：只读管理预览，选模型、改参数、校验组合、看 diff 与将生成的 compose——**不生效**，不碰 Docker、不写文件、不给 NInfer 发任何请求。
+- **管理视图**：选模型、改参数、校验组合、看 diff 与将生成的 compose——参数改动**不生效**，不碰 Docker、不写引擎的文件。唯一的真动作是**模型切换**：引擎以路由模式运行时，模型库里直接加载 / 睡下 / 卸载，走引擎自带的 `/models` 接口，由引擎自己执行。
 
 两个视图都遵循同一条底线：**只报实测，测不到就明说不可用，不造数**；而代码里**不带任何一台部署的配置**——模型库、预设、当前记录、限额全部来自你的运行环境（模型目录、你维护的数据文件、引擎与主机的实测值）。
 
@@ -71,9 +71,9 @@ python3 app.py
 
 右上角按钮切深浅色、切中英，记浏览器 `localStorage`；没选过时主题跟随系统、语言按浏览器判断。文案全在 `web/i18n.js`，`index.html` 里不放文案。
 
-## 管理视图（只读预览）
+## 管理视图
 
-页头「监控 / 管理」切换。能选模型、改参数、做校验、看 diff，但**不接生效**——不碰 Docker、不写 compose、不给 NInfer 发任何请求，「应用并重启」按钮禁用（生效闭环——socket-proxy + 登录 + 健康门 + 自动回滚——是后续版本的事）。
+页头「监控 / 管理」切换。能选模型、改参数、做校验、看 diff；**参数改动不接生效**——不碰 Docker、不写 compose，「应用并重启」按钮禁用。**模型切换是真动作**（下一条），走引擎自己的路由接口。
 
 **代码里不带任何部署的配置。** 模型库、预设、当前记录、限额全部来自运行环境：
 
@@ -85,12 +85,13 @@ python3 app.py
 - **预览变更**：diff（旧 → 新，镜像不变也明说）+ 中断警告（生效 = 重启、在飞请求会断）+ 将生成的 compose 全文（固定结构、只许 schema 内参数变化），仅供核对，不会写入任何地方。
 - **草稿与历史**：表单改动自动存草稿（数据卷 `console_draft.json`），刷新不丢；每次保存当前记录都会在历史里留一版（不是生效事件），任意一版可「载入预览」回填表单。
 - **导入 / 导出配置**：管理页顶部「配置数据」卡一键导出——模型登记、预设、当前记录打包成一个 JSON 配置包（带格式标记与版本号；模型目录的发现结果是机器状态，不进包）；导入时逐项覆盖这三样并逐项报告，坏条目跳过并说明、格式不对或版本不支持整包拒绝，当前记录还要过一遍兼容校验才落。备份、换机器、给第二台面板同步配置都走这个文件。原有的命令数组导入（`POST /api/console/import`）保留，那是把现有 serve 命令回填成表单，两者用途不同。
+- **模型切换（路由模式）**：引擎以路由模式启动时（`ninfer-serve --models-dir … --models-preset … --model-suspend`），面板轮询 `GET /models` 拿每个模型的实时状态（运行中 / 睡眠中 / 未加载 / 加载中），模型库每行带对应按钮：加载、唤醒、睡下、卸载（卸载要确认）。动作经 `POST /api/console/model-action` 转发到引擎的 `POST /models/load|sleep|unload`（带面板配置的 API key），引擎的回答原样回报——比如生成中睡不下，引擎回 409 `model_busy`，页面就报这个。睡下的模型保留引擎状态与会话、只还显存，唤醒是秒级；这套生命周期完全由引擎拥有，面板不碰 Docker、不重启任何东西。引擎没开路由模式时，模型库上方明说不可用，不假装。路由模式下没有模型在服务时，监控视图显示「路由」状态而不是误报离线。每个模型的参数在路由模式下由引擎的 preset 文件分段管理，改参数仍走那份文件 + 重启引擎一次，不在本页生效范围。
 
-接口：`GET /api/console`、`GET /api/console/export`、`POST /api/console/preview`、`POST /api/console/import`、`POST /api/console/import-bundle`、`POST /api/console/draft`、`POST /api/console/current`。逻辑单测在 `tests/test_console_core.py`（`python3 -m unittest discover -s tests`），夹具全是合成数据。
+接口：`GET /api/console`、`GET /api/console/export`、`GET /api/console/router`、`POST /api/console/preview`、`POST /api/console/import`、`POST /api/console/import-bundle`、`POST /api/console/draft`、`POST /api/console/current`、`POST /api/console/model-action`。逻辑单测在 `tests/test_console_core.py`（`python3 -m unittest discover -s tests`），夹具全是合成数据。
 
 ## 数据来源与口径
 
-监控视图只对 NInfer 发 GET：
+监控视图只对 NInfer 发 GET（管理视图的模型切换是唯一的例外，见上）：
 
 | 接口 | 用来显示什么 |
 | --- | --- |
