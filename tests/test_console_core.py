@@ -378,5 +378,35 @@ class TestRouterNormalize(unittest.TestCase):
             self.assertEqual(cc.normalize_router_models(bad), [])
 
 
+class TestPresetIni(unittest.TestCase):
+    GOOD = ("[*]\nmax-context = 262144\n\n"
+            "[model-a]\nspec = mtp\nvision = true\n\n"
+            "[model-b]\nspec = dflash2\n")
+
+    def test_valid_file(self):
+        r = cc.validate_preset_ini(self.GOOD, known_ids=["model-a"])
+        self.assertTrue(r["ok"])
+        self.assertEqual([s["name"] for s in r["sections"]],
+                         ["*", "model-a", "model-b"])
+        self.assertEqual(r["sections"][1]["keys"], 2)
+        self.assertEqual(r["unknown_sections"], ["model-b"])
+
+    def test_no_known_ids_no_unknowns(self):
+        r = cc.validate_preset_ini(self.GOOD)
+        self.assertEqual(r["unknown_sections"], [])
+
+    def test_duplicate_key_rejected(self):
+        self.assertFalse(cc.validate_preset_ini("[a]\nx = 1\nx = 2\n")["ok"])
+
+    def test_garbage_and_empty_rejected(self):
+        self.assertFalse(cc.validate_preset_ini("hello world")["ok"])
+        self.assertFalse(cc.validate_preset_ini("  \n")["ok"])
+        self.assertFalse(cc.validate_preset_ini(None)["ok"])
+
+    def test_oversize_rejected(self):
+        big = "[a]\n" + ("k = " + "v" * 100 + "\n") * 3000
+        self.assertFalse(cc.validate_preset_ini(big)["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

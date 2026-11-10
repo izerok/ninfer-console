@@ -30,7 +30,9 @@ What it never does:
     apply nothing — no Docker access, no compose writes.
     The only files it writes are the panel's own records in the data
     volume (the config on record, an unsaved-changes draft, and the
-    record history). No deployment's configuration is built into the
+    record history) — plus, only when the operator opts in with
+    PANEL_PRESET_FILE and a writable mount, the engine's preset file
+    (validated before writing, previous content backed up first). No deployment's configuration is built into the
     code: the library, presets and limits all come from the operator's
     own files, the models directory, and runtime measurements.
 
@@ -559,7 +561,7 @@ def _settings_save(url):
 # via nvidia-smi), never constants baked in for one machine.
 # _console_payload() cross-checks the fields /v1/load reports and
 # flags a mismatch instead of hiding it.
-CONSOLE_VERSION = "0.4.1"
+CONSOLE_VERSION = "0.5.0"
 _DATA_DIR = Path(HISTORY_FILE).parent
 CONSOLE_CURRENT_FILE = os.environ.get(
     "PANEL_CONSOLE_FILE", str(_DATA_DIR / "console_current.json"))
@@ -576,6 +578,12 @@ MODELS_HOST_DIR = os.environ.get("PANEL_MODELS_HOST_DIR", "/path/to/models")
 # files are normal — the library then comes from discovery alone.
 MODELS_FILE = os.environ.get("PANEL_MODELS_FILE", str(_DATA_DIR / "models.json"))
 PRESETS_FILE = os.environ.get("PANEL_PRESETS_FILE", str(_DATA_DIR / "presets.json"))
+# The ENGINE's router preset file (presets.ini), for the online editor.
+# Empty = not configured. Writing happens only when the operator mounts
+# this one file writable into the panel; the models directory itself
+# stays read-only. This is the single engine file the panel may write.
+ENGINE_PRESET_FILE = os.environ.get("PANEL_PRESET_FILE", "")
+PRESET_BACKUP_DIR = _DATA_DIR / "preset-backups"
 try:
     _HOST_CACHE_MAX_MIB_ENV = int(os.environ.get("PANEL_HOST_CACHE_MAX_MIB", "") or 0) or None
 except ValueError:
@@ -1135,6 +1143,84 @@ def _host_mem():
             "used_percent": (used / total * 100.0) if total else None}
 
 
+def _preset_known_ids():
+    """Ids a preset section may legitimately name: registered models,
+    discovered file stems, and whatever the router currently lists."""
+    known = set()
+    try:
+        models, _presets, _probs, _cfg, _found = _operator_data()
+        known.update(m["id"] for m in models)
+    except Exception:
+        pass
+    try:
+        _configured, found = _models_dir_scan()
+        for name in found:
+            if name.endswith(".ninfer"):
+                known.add(name[:-len(".ninfer")])
+    except Exception:
+        pass
+    with _lock:
+        known.update(m["id"] for m in _router["models"])
+    return known
+
+
+def _preset_file_state():
+    """Current engine preset file for the online editor. Read failures
+    are reported as reasons, never raised and never faked."""
+    if not ENGINE_PRESET_FILE:
+        return {"available": False, "reason": "not_configured"}
+    path = Path(ENGINE_PRESET_FILE)
+    if not path.is_file():
+        return {"available": False, "reason": "missing"}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return {"available": False, "reason": "unreadable"}
+    return {"available": True, "reason": "", "content": text,
+            "writable": os.access(path, os.W_OK),
+            "validation": console.validate_preset_ini(
+                text, _preset_known_ids())}
+
+
+def _preset_file_save(text):
+    """Validate, back up, then overwrite the engine preset file.
+
+    Returns (http_status, payload). The backup of the previous content
+    lands in the panel's own data dir (newest 5 kept) before any write,
+    so a bad save is always recoverable by hand."""
+    if not ENGINE_PRESET_FILE:
+        return 400, {"ok": False, "error": "not_configured"}
+    path = Path(ENGINE_PRESET_FILE)
+    if not path.is_file():
+        return 400, {"ok": False, "error": "missing"}
+    if not os.access(path, os.W_OK):
+        return 403, {"ok": False, "error": "not_writable"}
+    validation = console.validate_preset_ini(text, _preset_known_ids())
+    if not validation["ok"]:
+        return 400, {"ok": False, "validation": validation}
+    backup_name = None
+    try:
+        PRESET_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        backup_name = "presets-%s.ini" % time.strftime("%Y%m%d-%H%M%S")
+        (PRESET_BACKUP_DIR / backup_name).write_text(
+            path.read_text(encoding="utf-8"), encoding="utf-8")
+        backups = sorted(PRESET_BACKUP_DIR.glob("presets-*.ini"))
+        for old in backups[:-5]:
+            old.unlink()
+    except Exception as exc:
+        return 500, {"ok": False, "error": f"backup failed: {exc}"}
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except Exception as exc:
+        return 500, {"ok": False, "error": f"write failed: {exc}",
+                     "backup": backup_name}
+    return 200, {"ok": True, "validation": validation,
+                 "backup": backup_name, "restart_required": True}
+
+
 def _router_refresh():
     """Refresh the engine router state from GET /models. A 404 means
     the engine is not running as a router — a normal, reportable state,
@@ -1491,7 +1577,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path in ("/api/console/preview", "/api/console/import",
                          "/api/console/draft", "/api/console/current",
                          "/api/console/import-bundle",
-                         "/api/console/model-action"):
+                         "/api/console/model-action",
+                         "/api/console/preset-file"):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 data = json.loads(self.rfile.read(length).decode("utf-8"))
@@ -1547,6 +1634,21 @@ class Handler(BaseHTTPRequestHandler):
                 _console_record_current(cfg, "manual")
                 self._send(200, json.dumps({"saved": True, "warnings": warnings}),
                            "application/json")
+                return
+            if self.path == "/api/console/preset-file":
+                # Online edit of the ENGINE's router preset file. The
+                # text is validated before anything is written; the
+                # previous content is backed up into the panel's data
+                # dir first. Takes effect on the engine's next start —
+                # the panel never restarts anything.
+                content = data.get("content")
+                if not isinstance(content, str):
+                    self._send(400, json.dumps(
+                        {"ok": False, "error": "content must be text"}),
+                        "application/json")
+                    return
+                status, payload = _preset_file_save(content)
+                self._send(status, json.dumps(payload), "application/json")
                 return
             if self.path == "/api/console/model-action":
                 # Model switching via the engine's own router API.
@@ -1736,6 +1838,10 @@ class Handler(BaseHTTPRequestHandler):
                        "application/json",
                        {"Content-Disposition":
                         'attachment; filename="ninfer-console-config.json"'})
+            return
+        if self.path == "/api/console/preset-file":
+            self._send(200, json.dumps(_preset_file_state()),
+                       "application/json")
             return
         if self.path == "/api/console/router":
             with _lock:

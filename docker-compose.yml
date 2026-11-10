@@ -48,6 +48,13 @@ services:
       # and measure their sizes. Pairs with the volumes mount below.
       # The panel never writes to this directory.
       # PANEL_MODELS_DIR: "/models"
+      # Optional: online editing of the ENGINE's router preset file.
+      # This is the one engine file the panel may ever write, and only
+      # when you opt in here: set the path and mount that single file
+      # writable (the models directory itself stays read-only). Saves
+      # are validated and the previous content is backed up into the
+      # panel data volume; changes apply when the engine restarts.
+      # PANEL_PRESET_FILE: "/engine/presets.ini"
       # Optional: real per-request rows from NInfer's request log. Start
       # NInfer with --request-log-jsonl <file>, mount that file read-only
       # (see the volumes note below) and uncomment:
@@ -57,6 +64,9 @@ services:
       - /proc:/host/proc:ro
       # Optional models mount (pairs with PANEL_MODELS_DIR above):
       # - /path/to/models:/models:ro
+      # Optional engine preset file, writable (pairs with
+      # PANEL_PRESET_FILE above):
+      # - /path/to/models/presets.ini:/engine/presets.ini
       # Optional request-log mount (pairs with PANEL_REQUEST_LOG above):
       # - /path/to/ninfer-requests.jsonl:/app/request-log.jsonl:ro
       # Persists the history curve (data/history.jsonl) so a page refresh,

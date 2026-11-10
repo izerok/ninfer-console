@@ -132,6 +132,7 @@
   .mg-btn{background:var(--st-surface-2);color:var(--st-ink);border:1px solid var(--st-line);border-radius:999px;padding:8px 16px;font-size:13px;cursor:pointer}
   .mg-router-cell{display:inline-flex;gap:6px;align-items:center}
   .mg-router-cell .mg-btn{padding:5px 12px;font-size:12px}
+  .mg-preset-text{width:100%;min-height:280px;margin-top:8px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.55;resize:vertical;box-sizing:border-box}
   .mg-btn:hover{border-color:var(--st-ink-muted)}
   .mg-btn.primary{background:var(--st-accent);border-color:transparent;color:#06281c;font-weight:700}
   .mg-btn:disabled{opacity:.45;cursor:default}
@@ -454,6 +455,17 @@
     <div class="muted small" id="mgRouterNote" style="margin-top:6px"></div>
     <div id="mgModelList" style="margin-top:6px"></div>
     <div id="mgRouterExtra"></div>
+  </section>
+
+  <section class="st-card">
+    <div class="mg-head"><h2 data-i18n="mgPresetFile"></h2><span class="muted small" id="mgPresetFileState"></span></div>
+    <div class="muted small" id="mgPresetFileHint" style="margin-top:6px"></div>
+    <textarea id="mgPresetFileText" class="mg-preset-text" spellcheck="false" hidden></textarea>
+    <div class="mg-bundle-row" id="mgPresetFileBtns" hidden>
+      <button class="mg-btn" id="mgPresetFileReload" data-i18n="mgPresetReload"></button>
+      <button class="mg-btn primary" id="mgPresetFileSave" data-i18n="mgPresetSave"></button>
+      <span class="muted small" id="mgPresetFileMsg"></span>
+    </div>
   </section>
 
   <section class="st-card">
@@ -1436,6 +1448,7 @@ function switchView(name){
   if(mgRouterTimer){ clearInterval(mgRouterTimer); mgRouterTimer = null; }
   if(manage){
     refreshRouter();
+    loadPresetFile();
     mgRouterTimer = setInterval(refreshRouter, 5000);
   }
 }
@@ -1466,6 +1479,11 @@ function renderProblems(){
 }
 
 $('mgImportBtn').addEventListener('click', () => $('mgImportFile').click());
+$('mgPresetFileReload').addEventListener('click', () => { MG_PRESET_SAVED = null; loadPresetFile(); });
+$('mgPresetFileSave').addEventListener('click', savePresetFile);
+$('mgPresetFileText').addEventListener('input', () => {
+  $('mgPresetFileSave').disabled = $('mgPresetFileText').value === MG_PRESET_SAVED;
+});
 $('mgImportFile').addEventListener('change', async (ev) => {
   const file = ev.target.files[0];
   ev.target.value = '';
@@ -1631,6 +1649,57 @@ function paintRouter(){
       cell.appendChild(b);
     }
   });
+}
+
+let MG_PRESET_SAVED = null;
+async function loadPresetFile(){
+  const state = document.getElementById('mgPresetFileState');
+  const hint = document.getElementById('mgPresetFileHint');
+  const text = document.getElementById('mgPresetFileText');
+  const btns = document.getElementById('mgPresetFileBtns');
+  const msg = document.getElementById('mgPresetFileMsg');
+  let r;
+  try{ r = await (await fetch('/api/console/preset-file')).json(); }
+  catch(e){ hint.textContent = mgT().mgPresetUnreadable; return; }
+  if(!r.available){
+    text.hidden = true; btns.hidden = true; state.textContent = '';
+    hint.textContent = r.reason === 'not_configured'
+      ? mgT().mgPresetNotConfigured : mgT().mgPresetUnreadable;
+    return;
+  }
+  hint.textContent = mgT().mgPresetHint;
+  text.hidden = false; btns.hidden = false;
+  if(document.activeElement !== text || MG_PRESET_SAVED === null){
+    text.value = r.content; MG_PRESET_SAVED = r.content;
+  }
+  const v = r.validation || {};
+  state.textContent = (v.sections || []).map(s => s.name).join(' · ');
+  if(!r.writable) msg.textContent = mgT().mgPresetNotWritable;
+  document.getElementById('mgPresetFileSave').disabled =
+    text.value === MG_PRESET_SAVED || !r.writable;
+}
+async function savePresetFile(){
+  const text = document.getElementById('mgPresetFileText');
+  const msg = document.getElementById('mgPresetFileMsg');
+  try{
+    const resp = await fetch('/api/console/preset-file', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({content: text.value})});
+    const r = await resp.json();
+    if(!r.ok){
+      const errs = (r.validation && r.validation.errors || [r.error || '']).join('; ');
+      msg.textContent = mgT().mgPresetInvalid + errs;
+      return;
+    }
+    MG_PRESET_SAVED = text.value;
+    document.getElementById('mgPresetFileSave').disabled = true;
+    let note = mgT().mgPresetSaved + mgT().mgPresetRestartNote;
+    if(r.validation && r.validation.unknown_sections && r.validation.unknown_sections.length)
+      note += ' ' + mgT().mgPresetUnknownSections + r.validation.unknown_sections.join(', ');
+    msg.textContent = note;
+  }catch(e){
+    msg.textContent = mgT().mgPresetInvalid + String(e);
+  }
 }
 
 async function refreshRouter(){

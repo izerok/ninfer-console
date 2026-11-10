@@ -851,3 +851,49 @@ def parse_command(args, models=()):
         if m:
             cfg["model"] = m["id"]
     return cfg, unparsed, model_file
+
+
+# ---------------------------------------------------------------------------
+# Engine router preset file (presets.ini) validation
+#
+# In router mode the engine reads per-model serve parameters from an INI
+# file at startup. The console's online editor validates the text before
+# anything is written: structure errors are hard failures, while sections
+# matching no known model are warnings only (the engine ignores sections
+# it cannot use, and newer engines may know ids this build does not).
+
+PRESET_INI_MAX_BYTES = 256 * 1024
+
+
+def validate_preset_ini(text, known_ids=None):
+    """Validate engine preset INI text.
+
+    Returns {"ok", "errors", "sections", "unknown_sections"}: sections
+    is [{"name", "keys"}] in file order ('*' is the shared section);
+    unknown_sections lists section names matching no known id (warning
+    grade, never blocks)."""
+    import configparser
+    if not isinstance(text, str) or not text.strip():
+        return {"ok": False, "errors": ["empty content"], "sections": [],
+                "unknown_sections": []}
+    if len(text.encode("utf-8")) > PRESET_INI_MAX_BYTES:
+        return {"ok": False,
+                "errors": [f"file too large (> {PRESET_INI_MAX_BYTES} bytes)"],
+                "sections": [], "unknown_sections": []}
+    parser = configparser.ConfigParser(interpolation=None, strict=True)
+    parser.optionxform = str
+    try:
+        parser.read_string(text)
+    except configparser.Error as exc:
+        return {"ok": False, "errors": [str(exc)], "sections": [],
+                "unknown_sections": []}
+    sections = [{"name": name, "keys": len(parser[name])}
+                for name in parser.sections()]
+    if not sections:
+        return {"ok": False, "errors": ["no sections"], "sections": [],
+                "unknown_sections": []}
+    known = set(known_ids or [])
+    unknown = [s["name"] for s in sections
+               if s["name"] != "*" and known and s["name"] not in known]
+    return {"ok": True, "errors": [], "sections": sections,
+            "unknown_sections": unknown}
